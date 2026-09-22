@@ -117,21 +117,18 @@ attestation-go/ratls, which owns the wire format:
   Azure evidence wrapped in a Hyper-V HCL header is normalized back to the raw
   report where needed.
 
-Certificates live 24h by default and rotate in the background at 50% of TTL.
-While the current certificate is still inside its validity window it keeps
-serving, so a short attestation-api hiccup degrades rotation, not traffic
-(`tls.go`). Past `NotAfter` there is no such grace: the manager will not hand
-an expired credential to a handshake, so it provisions synchronously and the
-handshake gets a fresh certificate or an error. That hard stop is only reached
-after rotation has failed continuously for **half the certificate lifetime** —
-`rotateAt = now + ttl/2` is always strictly inside the window, which leaves 12h
-of retries at the default TTL — but once reached, the outage is a traffic
-outage, not a rotation one. The synchronous attempt is single-flighted,
-bounded by the rotation timeout, and a failure is briefly negative-cached, so a
-down certificate source sees one request per cooldown rather than one per
-connection. Readiness reflects it: `/ready` gates on the cached certificate
-still being usable, so a pod in that state leaves the endpoint list instead of
-blackholing the traffic Kubernetes routes to it.
+Certificates live 24h by default. ratls-mesh runs a timer for each server and
+client certificate, checking once per minute for renewal at 50% of TTL even
+while idle. Checks honor exponential jittered retry backoff (5s initial
+interval, 1 minute maximum base interval), including while expired and
+NotReady. Provider upgrades are observed on the next check. Each attempt is
+bounded by the rotation timeout.
+While valid, the cached certificate remains available during renewal. After
+`NotAfter`, handshakes request a fresh certificate or fail; they never receive
+an expired credential. Synchronous attempts are single-flighted and failures
+are briefly negative-cached. `/ready` requires both cached certificates to be
+usable; renewal continues independently of readiness. Renewal logs carry
+`cert_role`, and `ratls_mesh_cert_rotation_failures_total` has a `role` label.
 
 ## The handshake, step by step
 

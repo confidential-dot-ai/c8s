@@ -82,7 +82,7 @@ func (h *healthServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 		if !h.serverCertMgr.CertUsable() {
-			http.Error(w, "server cert outside its validity window and rotation is failing", http.StatusServiceUnavailable)
+			http.Error(w, "server cert outside its validity window", http.StatusServiceUnavailable)
 			return
 		}
 	}
@@ -92,7 +92,7 @@ func (h *healthServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 		if !h.clientCertMgr.CertUsable() {
-			http.Error(w, "client cert outside its validity window and rotation is failing", http.StatusServiceUnavailable)
+			http.Error(w, "client cert outside its validity window", http.StatusServiceUnavailable)
 			return
 		}
 	}
