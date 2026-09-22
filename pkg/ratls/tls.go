@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
+
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
@@ -162,6 +164,11 @@ type certState struct {
 	mu              sync.RWMutex
 	cert            *tls.Certificate
 	rotateAt        time.Time
+	revision        uint64
+	retryAt         time.Time
+	retryBackoff    *backoff.ExponentialBackOff
+	rotationChanged chan struct{}
+	rotationCancel  context.CancelFunc
 	provider        CertProvider // certificate provisioning strategy
 	logger          Logger
 	rotating        atomic.Bool   // prevents concurrent background rotations
@@ -256,6 +263,8 @@ func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error
 	cached := s.cert
 	rotateAt := s.rotateAt
 	currentProvider := s.provider // capture under RLock before releasing
+	retryAt := s.retryAt
+	revision := s.revision
 	s.mu.RUnlock()
 
 	if cached != nil {
@@ -263,17 +272,12 @@ func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error
 		switch {
 		case err == nil:
 			s.unusableLogged.Store(false)
-			if !now.After(rotateAt) {
+			if now.Before(rotateAt) || now.Before(retryAt) {
 				return cached, nil
 			}
 
-			// Cert still valid but due for rotation — return old cert,
-			// provision new one in the background. rotateAt is handed to the
-			// rotation so it can tell whether a newer cert landed while it
-			// worked.
-			if s.rotating.CompareAndSwap(false, true) {
-				go s.backgroundProvision(currentProvider, rotateAt)
-			}
+			// A renewal may install only against the revision that started it.
+			s.requestRotation(currentProvider, revision)
 			return cached, nil
 		case s.logger != nil && s.unusableLogged.CompareAndSwap(false, true):
 			s.logger.Warn("ratls: cached certificate is outside its validity window, provisioning synchronously", "err", err)
@@ -358,6 +362,7 @@ func (s *certState) syncProvision(ctx context.Context, now time.Time) (*tls.Cert
 func (s *certState) provisionNow(ctx context.Context) (*tls.Certificate, error) {
 	s.mu.RLock()
 	provider := s.provider
+	revision := s.revision
 	s.mu.RUnlock()
 
 	pctx, cancel := context.WithTimeout(ctx, s.effectiveRotationTimeout())
@@ -374,14 +379,26 @@ func (s *certState) provisionNow(ctx context.Context) (*tls.Certificate, error) 
 		return nil, err
 	}
 
+	if err := usableForHandshake(cert, time.Now()); err != nil {
+		return nil, err
+	}
 	if ttl == 0 {
 		ttl = s.effectiveTTL()
 	}
 	newRotateAt := time.Now().Add(ttl / 2)
 
 	s.mu.Lock()
+	if s.revision != revision {
+		current := s.cert
+		s.mu.Unlock()
+		if current == nil {
+			return nil, fmt.Errorf("ratls: certificate changed during provisioning")
+		}
+		return current, usableForHandshake(current, time.Now())
+	}
 	s.cert = cert
 	s.rotateAt = newRotateAt
+	s.certificateInstalledLocked()
 	s.mu.Unlock()
 	s.provisioned.Store(true)
 	s.unusableLogged.Store(false)
@@ -438,23 +455,28 @@ func usableForHandshake(cert *tls.Certificate, now time.Time) error {
 	return certutil.CheckValidity(cert.Leaf, now)
 }
 
-// backgroundProvision provisions a new certificate without blocking callers.
-// On failure, the old cert continues being served and the next handshake
-// past rotateAt will retry. spawnProvider and spawnRotateAt are the provider
-// and rotation deadline that were current when rotation was triggered: if
-// either moved while we worked — SwapProvider installed a new provider, or a
-// synchronous provision landed a newer cert after this one crossed NotAfter —
-// the result is discarded rather than overwriting the newer certificate with
-// an older one.
-func (s *certState) backgroundProvision(spawnProvider CertProvider, spawnRotateAt time.Time) {
-	defer s.rotating.Store(false)
+// backgroundProvision installs a renewal only while the captured revision is current.
+func (s *certState) backgroundProvision(ctx context.Context, spawnProvider CertProvider, revision uint64) {
+	defer func() {
+		s.mu.Lock()
+		if s.rotationCancel != nil {
+			s.rotationCancel()
+			s.rotationCancel = nil
+		}
+		s.rotating.Store(false)
+		s.notifyRotationLocked()
+		s.mu.Unlock()
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.effectiveRotationTimeout())
+	ctx, cancel := context.WithTimeout(ctx, s.effectiveRotationTimeout())
 	defer cancel()
 
 	cert, ttl, err := spawnProvider.Provision(ctx)
 	if err == nil {
 		err = ensureLeaf(cert)
+	}
+	if err == nil {
+		err = usableForHandshake(cert, time.Now())
 	}
 	if err != nil {
 		if s.logger != nil {
@@ -463,6 +485,17 @@ func (s *certState) backgroundProvision(spawnProvider CertProvider, spawnRotateA
 		if s.onRotationFail != nil {
 			s.onRotationFail()
 		}
+		s.mu.Lock()
+		if s.revision == revision {
+			if s.retryBackoff == nil {
+				s.retryBackoff = backoff.NewExponentialBackOff()
+				s.retryBackoff.InitialInterval = syncProvisionCooldown
+				s.retryBackoff.MaxInterval = time.Minute
+				s.retryBackoff.Reset()
+			}
+			s.retryAt = time.Now().Add(s.retryBackoff.NextBackOff())
+		}
+		s.mu.Unlock()
 		return
 	}
 
@@ -471,27 +504,15 @@ func (s *certState) backgroundProvision(spawnProvider CertProvider, spawnRotateA
 	}
 	rotateAt := time.Now().Add(ttl / 2)
 	s.mu.Lock()
-	switch {
-	case s.provider != spawnProvider:
-		// Provider was swapped while we were provisioning — discard stale cert.
+	if s.revision != revision {
 		s.mu.Unlock()
-		if s.logger != nil {
-			s.logger.Info("ratls: discarding background rotation (provider changed)")
-		}
-		return
-	case s.rotateAt.After(spawnRotateAt):
-		// Something stored a newer certificate while we worked — the
-		// synchronous fail-closed path, or another rotation. Ours is the
-		// older one; dropping it keeps rotation monotonic.
-		s.mu.Unlock()
-		if s.logger != nil {
-			s.logger.Info("ratls: discarding background rotation (a newer certificate was stored)")
-		}
 		return
 	}
 	s.cert = cert
 	s.rotateAt = rotateAt
+	s.certificateInstalledLocked()
 	s.mu.Unlock()
+	s.provisioned.Store(true)
 	s.unusableLogged.Store(false)
 	s.clearCooldown()
 
@@ -560,6 +581,7 @@ func (s *certState) SwapProvider(ctx context.Context, provider CertProvider) err
 	s.provider = provider
 	s.cert = cert
 	s.rotateAt = rotateAt
+	s.certificateInstalledLocked()
 	s.mu.Unlock()
 	s.provisioned.Store(true)
 	s.unusableLogged.Store(false)
