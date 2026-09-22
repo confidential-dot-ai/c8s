@@ -164,8 +164,10 @@ func TestMeshHandshakeRejectsUnpinnedMeasurement(t *testing.T) {
 }
 
 // meshVerifyPolicy must carry the --rtmrs pins into the policy the handshake
-// enforces, and refuse a malformed pin outright.
-func TestMeshVerifyPolicyParsesRTMRPins(t *testing.T) {
+// enforces, and refuse a malformed pin outright. This only exercises the flag
+// parsing: no attestation is fetched or verified, so no TDX evidence or mock
+// is involved. The handshake tests above cover the SNP-flavoured mock only.
+func TestMeshVerifyPolicyParsesRegisterPins(t *testing.T) {
 	hex48 := strings.Repeat("ab", 48)
 	policy, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "1="+hex48+",2="+hex48)
 	if err != nil {
