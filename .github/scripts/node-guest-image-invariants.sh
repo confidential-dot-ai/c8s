@@ -85,15 +85,52 @@ if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   exit 1
 fi
 
-# The locked image must keep the kubelet debugging handlers off (no kubectl
-# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
-# turn them back on, and only through the sync-rendered drop-in.
-if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
-  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+# The kubelet debugging handlers stay on (they back kubectl logs, which the
+# log-reader credential exists for); exec/attach/port-forward/ephemeral
+# containers are closed at the apiserver by the baked pod-exec-policy AddOn
+# (its shape and expression are tested in internal/helmchart). Only the
+# C8S_DEV=1 build may skip that AddOn, and only through the sync-rendered
+# .skip marker.
+manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+sync="$ngi/c8s/mkosi.sync"
+if ! grep -qxF '  - enable-debugging-handlers=true' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=true (kubectl logs)"
   exit 1
 fi
-if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
-  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+# cred-release identities are bounded: the operator binding must not name
+# cluster-admin (the baked guards must hold against the credential holder).
+if grep -q 'name: cluster-admin' "$manifests/cred-release-rbac.yaml"; then
+  echo "::error::$manifests/cred-release-rbac.yaml binds the operator to cluster-admin; the baked guards must hold against the credential holder"
+  exit 1
+fi
+# Every guard AddOn — each baked admission policy and each binding of a
+# cred-release group — must be staged by mkosi.sync as a reference copy on
+# the read-only root, where psa-ready.sh waits for it and compares the live
+# objects against it. mkosi.sync's GUARDS list is the single statement of
+# what is a guard; check it against the manifests rather than repeating it.
+guards=$(sed -n 's/^GUARDS="\(.*\)"$/\1/p' "$sync")
+if [ -z "$guards" ] || ! grep -q 'usr/lib/confai/guards' "$sync"; then
+  echo "::error::$sync must list the guard AddOns in GUARDS= and stage them under /usr/lib/confai/guards"
+  exit 1
+fi
+for guard in $guards; do
+  if [ ! -f "$manifests/$guard.yaml" ]; then
+    echo "::error::$sync stages $guard.yaml as a guard but $manifests/$guard.yaml is missing"
+    exit 1
+  fi
+done
+for file in $(grep -lE 'kind: ValidatingAdmissionPolicy$|name: c8s:' "$manifests"/*.yaml); do
+  guard=$(basename "$file" .yaml)
+  case " $guards " in
+    *" $guard "*) ;;
+    *)
+      echo "::error::$file is a guard (an admission policy or a cred-release group binding) but $sync GUARDS= does not stage it"
+      exit 1
+      ;;
+  esac
+done
+if find "$ngi/c8s/mkosi.extra" -name '*.skip' | grep -q .; then
+  echo "::error::a baked .skip marker disables an RKE2 AddOn; only mkosi.sync may render one, for dev=1"
   exit 1
 fi
 if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
@@ -239,7 +276,7 @@ fi
 # pods, and the baked policy that stops tenants relabelling their namespaces
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
-vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+vap="$manifests/psa-level-policy.yaml"
 psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
@@ -277,11 +314,14 @@ if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
   exit 1
 fi
 for required in \
-  'get validatingadmissionpolicy "$policy"' \
-  'get validatingadmissionpolicybinding "$policy"' \
+  'GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}' \
+  'replace --dry-run=server -f "$file"' \
+  'get -f "$file"' \
   '--as="$probe_user" create --dry-run=server' \
   'probe_namespace restricted' \
-  'probe_namespace privileged'; do
+  'probe_namespace privileged' \
+  'probe_scope default' \
+  'probe_scope kube-system'; do
   if ! grep -qF -- "$required" "$psa_gate"; then
     echo "::error::$psa_gate is missing required live admission probe: $required"
     exit 1
@@ -301,7 +341,6 @@ grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/syste
 
 # The image renders Kubernetes integration from its staged binary at BUILD
 # time. It must not revive a c8s HelmChart or boot-time values merge.
-sync="$ngi/c8s/mkosi.sync"
 for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
              '--kube-version "${RKE2_VERSION%%+*}"' \
              'c8s-integration.yaml' '/usr/lib/c8s/allowlist-seed.json' \

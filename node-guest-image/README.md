@@ -27,10 +27,12 @@ Layout:
   contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
-  The locked image runs the kubelet with `enable-debugging-handlers=false`,
-  so `kubectl exec`, `attach`, `port-forward`, and `logs` fail for every
-  kubeconfig holder; `C8S_DEV=1` turns them back on (with the serial
-  autologin), at a different measurement.
+  The locked image keeps the kubelet debugging handlers on so `kubectl logs`
+  works for every kubeconfig holder, and bakes the `pod-exec-policy.yaml`
+  AddOn so `kubectl exec`, `attach`, `port-forward` and `debug` (ephemeral
+  containers) are denied in admission for everyone, the operator included;
+  `C8S_DEV=1` skips that AddOn (with the serial autologin), at a different
+  measurement.
 
 ## Launch requirements
 
@@ -294,16 +296,37 @@ A namespace label can normally lower that level. The baked
 `psa-level-policy.yaml` AddOn denies an `enforce` label other than
 `restricted`, or an `enforce-version` other than `latest`, unless the
 caller is authorized to grant `podsecurityexemptions.confidential.ai` (verb
-`grant`), a virtual resource no default role includes. cluster-admin and
-system:masters pass; a tenant holding `admin` or `edit` in its own
-namespaces does not. The invariant therefore rests on tenancy: hand tenants
-namespace-scoped credentials, never cluster-admin, and the launch
-measurement vouches for the floor their pods run under. cluster-admin can
-delete the policy, and RKE2 does not recreate deleted AddOn objects.
+`grant`), a virtual resource no default role includes. Only the in-guest
+`rke2.yaml` (system:masters) passes; the released operator credential holds
+no wildcard and does not, nor does a tenant holding `admin` or `edit` in
+its own namespaces. The launch measurement vouches for the floor every pod
+runs under. No released credential can delete or edit the policy: the
+operator's `c8s-node-operator` ClusterRole (`cred-release-rbac.yaml`) has
+no admission or cluster-scoped RBAC writes, and the `confos-operator-scope`
+policy (`operator-scope-policy.yaml`) denies them in admission for every
+`c8s:` group regardless of RBAC, together with every write in the
+privileged namespaces (`kube-system`, `local-path-storage` and the baked
+operator's `c8s-system`) and the kubelet-proxy subresources. The
+`psa-ready.sh` gate proves that deny path before cred-release serves.
+
+`kubectl exec`, `attach`, `port-forward` and ephemeral containers are closed
+by the baked `pod-exec-policy.yaml` AddOn (`confos-pod-exec`), a constant
+deny on those subresources for every principal. The kubelet's debugging
+handlers stay on because they also serve `kubectl logs`, which the
+`log-reader` credential (`c8s get-kubeconfig --role log-reader`, bound by the
+baked `log-reader-rbac.yaml` AddOn to read pods, their logs, namespaces and
+events) exists for. As with the PodSecurity policy, no released credential
+can delete it.
+
+The guard AddOns live in `server/manifests`, which is on the writable
+overlay because RKE2 stages its bundled charts there. `mkosi.sync` therefore
+copies each guard to `/usr/lib/confai/guards` on the read-only root, and
+`psa-ready.sh` renders every copy through a server-side dry-run and requires
+the live objects to match it field for field before cred-release serves.
 
 RKE2 reconciles AddOns after kube-apiserver starts. The attested credential
-endpoint therefore remains closed until `psa-ready.sh` sees the policy and
-binding and proves, through server-side dry-runs as a synthetic non-granter,
+endpoint therefore remains closed until `psa-ready.sh` sees both policies,
+both credential bindings, and proves, through server-side dry-runs as a synthetic non-granter,
 that a restricted namespace is admitted and a privileged one is denied by
 `confos-psa-level`. No externally released operator credential can enter the
 first-boot reconciliation window.

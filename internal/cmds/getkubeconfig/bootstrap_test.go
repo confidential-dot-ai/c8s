@@ -102,7 +102,7 @@ func newBootstrapEnv(t *testing.T, platform teetypes.PlatformType, mutateFresh f
 		case credrelease.ReleasePath:
 			releases.Add(1)
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
+			releaseHandler(t, http.StatusOK, goodRelease, nil).ServeHTTP(w, r)
 		default:
 			t.Errorf("unexpected request path %q", r.URL.Path)
 			http.NotFound(w, r)
