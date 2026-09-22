@@ -1377,7 +1377,7 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
 // ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
 // (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
-// tdx). aks uses the Azure vTPM path regardless of the CPU Family: the node's
+// tdx). aks uses the Azure vTPM path regardless of the CPU TEE type: the node's
 // vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
 // on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
 // aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
