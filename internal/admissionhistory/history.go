@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -32,10 +31,24 @@ func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObs
 	}
 	delete(h.unresolved, id)
 	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone(), Mounts: slices.Clone(mounts)}
-	slices.SortFunc(c.Mounts, func(a, b allowlist.ObservedMount) int {
-		return cmp.Or(strings.Compare(a.Destination, b.Destination), strings.Compare(string(a.Class), string(b.Class)), strings.Compare(string(a.Storage), string(b.Storage)))
-	})
+	slices.SortFunc(c.Mounts, compareObservedMounts)
 	h.byKey[c.Key()] = c
+}
+
+func compareObservedMounts(a, b allowlist.ObservedMount) int {
+	order := cmp.Or(
+		cmp.Compare(a.Destination, b.Destination),
+		cmp.Compare(a.Class, b.Class),
+		cmp.Compare(a.Storage, b.Storage),
+		cmp.Compare(a.HostSourceDigest, b.HostSourceDigest),
+	)
+	if order != 0 || a.ReadOnly == b.ReadOnly {
+		return order
+	}
+	if a.ReadOnly {
+		return 1
+	}
+	return -1
 }
 
 // Snapshot returns sorted, independent copies of the digest set and admissions.

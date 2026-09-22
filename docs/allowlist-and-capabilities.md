@@ -257,6 +257,20 @@ or `NODE_PATH` values whose search directories overlap a declared `data` mount:
 those directories could load mounted content as code. The deprecated
 `lint --cvm-mode` flag has no effect; NRI observes both environment and mounts.
 
+A `host` rule pins an exact source path and mount-level access mode:
+
+```json
+{"destination":"/config","kind":"host","source":"/etc/service","readOnly":true}
+```
+
+The source is the clean absolute path in the final OCI specification, after
+containerd resolves symlinks. An omitted `readOnly` requires a writable mount.
+Host evidence carries a SHA-256 source commitment and the access mode through
+inventory and release matching. Host-backed workloads remain host-dependent;
+the path pin grants access to the contents at that node path. Read-only mode
+applies to the mount itself; nested mounts retain their own flags. Recursive
+read-only/write mount options leave the host source commitment unavailable.
+
 The pod UID embedded in a kubelet source must equal the pod being admitted, and
 containerd sandbox sources must name its exact sandbox. These runtime IDs prove
 local ownership only and are not serialized into the stable allowlist.
@@ -266,13 +280,13 @@ local ownership only and are not serialized into the stable allowlist.
 | Node-created platform mount at its fixed destination | `platform` | not relevant | admitted without a rule |
 | Current pod's `emptyDir` on tmpfs | `emptyDir` | `memory` | requires a matching `emptyDir` rule |
 | Current pod's `emptyDir` whose backing chain reaches encrypted boot scratch | `emptyDir` | `encrypted` | requires a matching `emptyDir` rule |
-| Another pod's `emptyDir` | `host` | `unknown` | denied |
+| Another pod's `emptyDir` | `host` | `unknown` | requires an explicit host rule |
 | Mapping merely named `scratch` | `emptyDir` | `unknown` | denied |
 | Missing or inconsistent scratch evidence | `emptyDir` | `unknown` | denied |
 | Plain disk-backed `emptyDir` | `emptyDir` | `unknown` | denied |
 | ConfigMap, Secret, projected, PVC, CSI, local data, or a subpath | `data` | observed | requires a matching `data` rule under `/mnt/c8s-data/` and memory or encrypted storage |
 | Reserved `c8s-volume-*` placeholder or propagated volume | `data` | observed | requires the same `data` rule, including before volume propagation |
-| Host path or unrecognized source | `host` | `unknown` | denied |
+| Host path | `host` | `unknown` | requires a matching source, destination, and read-only mode |
 
 The Linux observer resolves tmpfs directly. For disk storage it resolves the
 containing mount and walks the device-mapper slave graph. A writable overlay
