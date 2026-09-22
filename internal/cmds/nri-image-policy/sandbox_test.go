@@ -169,6 +169,43 @@ func TestSandboxViolations(t *testing.T) {
 			want: "host path bind mount",
 		},
 		{
+			name: "own kubelet directory escaped with ..",
+			ctr: func(c *api.Container) {
+				c.Mounts = append(c.Mounts, &api.Mount{
+					Destination: "/host",
+					Type:        "bind",
+					Source:      "/var/lib/kubelet/pods/" + testPodUID + "/../../../..",
+				})
+			},
+			want: "host path bind mount",
+		},
+		{
+			name: "own sandbox directory escaped with ..",
+			ctr: func(c *api.Container) {
+				c.Mounts = append(c.Mounts, &api.Mount{
+					Destination: "/sandboxes",
+					Type:        "bind",
+					Source:      "/run/k3s/containerd/io.containerd.grpc.v1.cri/sandboxes/" + testSandboxID + "/..",
+				})
+			},
+			want: "host path bind mount",
+		},
+		{
+			name: "pod UID as a segment outside the kubelet root",
+			ctr: func(c *api.Container) {
+				c.Mounts = append(c.Mounts, &api.Mount{Destination: "/mnt", Type: "bind", Source: "/mnt/" + testPodUID + "/data"})
+			},
+			want: "host path bind mount",
+		},
+		{
+			name: "control-plane-chosen UID naming a host directory",
+			pod:  func(p *api.PodSandbox) { p.Uid = "etc" },
+			ctr: func(c *api.Container) {
+				c.Mounts = append(c.Mounts, &api.Mount{Destination: "/host-etc", Type: "bind", Source: "/etc"})
+			},
+			want: "host path bind mount",
+		},
+		{
 			name: "unidentifiable pod",
 			pod: func(p *api.PodSandbox) {
 				p.Uid, p.Id = "", ""

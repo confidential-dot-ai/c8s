@@ -339,8 +339,9 @@ A container is denied when it holds any of:
 
 - a host ipc, network, pid or uts namespace;
 - a bind mount whose source the pod does not own — every mount the kubelet and
-  containerd stage lives under a directory named by the pod UID or the sandbox
-  ID, so anything else is a `hostPath`;
+  containerd stage lives under the pod's kubelet directory
+  (`/var/lib/kubelet/pods/<uid>/`) or its containerd sandbox directory, matched
+  as a clean-path prefix, so anything else is a `hostPath`;
 - a device node, a CDI device, or a host network device moved in;
 - an OCI hook, which names code outside the reviewed image and entrypoint;
 - a container sysctl;

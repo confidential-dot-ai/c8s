@@ -170,17 +170,22 @@ func namespaceTypes(nss []*api.LinuxNamespace) []string {
 // hostBinds returns the bind sources the pod does not own. A bind mount is one
 // whose source is an absolute path; the rest name a filesystem type and carry
 // nothing in. Every mount the kubelet and containerd stage for a pod lives
-// under a directory named by the pod UID (/var/lib/kubelet/pods/<uid>/...) or
-// by the sandbox ID (the sandbox's resolv.conf, hostname and shm), so a source
-// naming neither is a hostPath — or another pod's directory.
+// under the pod's kubelet directory (/var/lib/kubelet/pods/<uid>/) or its
+// containerd sandbox directory (resolv.conf, hostname and shm), so a source
+// under neither is a hostPath — or another pod's directory.
 //
-// A pod with neither identifier is unidentifiable, and every bind is then
-// foreign.
+// Ownership is a clean-path prefix, as in mounts.go: the control plane picks
+// the pod UID, so a UID appearing anywhere in the source proves nothing, and an
+// uncleaned source would let `<uid>/..` name the parent. A pod with neither
+// identifier is unidentifiable, and every bind is then foreign.
 func hostBinds(pod *api.PodSandbox, ctr *api.Container, ownSocketDir string) []string {
-	owners := make([]string, 0, 2)
-	for _, o := range []string{pod.GetUid(), pod.GetId()} {
-		if o != "" {
-			owners = append(owners, o)
+	var owned []string
+	if uid := pod.GetUid(); uid != "" {
+		owned = append(owned, kubeletRoot+"/pods/"+uid+"/")
+	}
+	if id := pod.GetId(); id != "" {
+		for _, root := range containerdRoots {
+			owned = append(owned, root+"/io.containerd.grpc.v1.cri/sandboxes/"+id+"/")
 		}
 	}
 	var out []string
@@ -189,7 +194,7 @@ func hostBinds(pod *api.PodSandbox, ctr *api.Container, ownSocketDir string) []s
 		if !strings.HasPrefix(src, "/") {
 			continue
 		}
-		if slices.ContainsFunc(owners, func(o string) bool { return hasPathSegment(src, o) }) {
+		if cleanAbsolute(src) && slices.ContainsFunc(owned, func(dir string) bool { return strings.HasPrefix(src, dir) }) {
 			continue
 		}
 		if ownSocketDir != "" && src == ownSocketDir && m.GetDestination() == workloadclaims.SidecarSocketDir {
@@ -198,10 +203,6 @@ func hostBinds(pod *api.PodSandbox, ctr *api.Container, ownSocketDir string) []s
 		out = append(out, src)
 	}
 	return out
-}
-
-func hasPathSegment(path, segment string) bool {
-	return slices.Contains(strings.Split(path, "/"), segment)
 }
 
 // writableKernelFS returns the destinations of sysfs and cgroup mounts that are
