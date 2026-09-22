@@ -66,6 +66,23 @@ func sandboxedContainer() *api.Container {
 	}
 }
 
+// injectedPod marks the pod as one the webhook injected sidecars into.
+func injectedPod(p *api.PodSandbox) {
+	p.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+}
+
+// injectedSocketMount turns the container into a sidecar carrying the mount
+// socketDirAdjustment adds.
+func injectedSocketMount(c *api.Container) {
+	c.Name = workloadclaims.CertContainerName
+	c.Mounts = append(c.Mounts, &api.Mount{
+		Destination: workloadclaims.SidecarSocketDir,
+		Type:        "bind",
+		Source:      "/var/run/nri-image-policy",
+		Options:     []string{"rbind", "ro", "rprivate", "nosuid", "nodev", "noexec"},
+	})
+}
+
 func TestSandboxViolations(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -78,15 +95,36 @@ func TestSandboxViolations(t *testing.T) {
 			name: "ordinary pod",
 		},
 		{
-			name: "the plugin's own inventory socket mount",
+			name:      "the plugin's own inventory socket mount",
+			pod:       injectedPod,
+			ctr:       injectedSocketMount,
+			ownSocket: "/var/run/nri-image-policy",
+		},
+		{
+			name: "a writable mount of the socket directory",
+			pod:  injectedPod,
 			ctr: func(c *api.Container) {
-				c.Mounts = append(c.Mounts, &api.Mount{
-					Destination: workloadclaims.SidecarSocketDir,
-					Type:        "bind",
-					Source:      "/var/run/nri-image-policy",
-				})
+				injectedSocketMount(c)
+				c.Mounts[len(c.Mounts)-1].Options = []string{"rbind", "rw"}
 			},
 			ownSocket: "/var/run/nri-image-policy",
+			want:      "host path bind mount",
+		},
+		{
+			name: "the socket mount in a container the webhook did not inject",
+			pod:  injectedPod,
+			ctr: func(c *api.Container) {
+				injectedSocketMount(c)
+				c.Name = "app"
+			},
+			ownSocket: "/var/run/nri-image-policy",
+			want:      "host path bind mount",
+		},
+		{
+			name:      "the socket mount in a pod without the injection annotation",
+			ctr:       injectedSocketMount,
+			ownSocket: "/var/run/nri-image-policy",
+			want:      "host path bind mount",
 		},
 		{
 			name: "a socket mount the plugin did not inject",

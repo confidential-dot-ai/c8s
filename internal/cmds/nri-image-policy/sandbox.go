@@ -197,12 +197,24 @@ func hostBinds(pod *api.PodSandbox, ctr *api.Container, ownSocketDir string) []s
 		if cleanAbsolute(src) && slices.ContainsFunc(owned, func(dir string) bool { return strings.HasPrefix(src, dir) }) {
 			continue
 		}
-		if ownSocketDir != "" && src == ownSocketDir && m.GetDestination() == workloadclaims.SidecarSocketDir {
+		if ownSocketDir != "" && src == ownSocketDir && isInjectedSocketMount(pod, ctr, m) {
 			continue
 		}
 		out = append(out, src)
 	}
 	return out
+}
+
+// isInjectedSocketMount reports whether m is the mount socketDirAdjustment
+// adds: read-only, at the sidecar socket directory, in a sidecar of an injected
+// pod. A pod-spec hostPath at the same source and destination is a host bind
+// like any other — writable, it would let the container replace the node's
+// inventory sockets.
+func isInjectedSocketMount(pod *api.PodSandbox, ctr *api.Container, m *api.Mount) bool {
+	return m.GetDestination() == workloadclaims.SidecarSocketDir &&
+		slices.Contains(m.GetOptions(), "ro") &&
+		pod.GetAnnotations()[workloadclaims.AnnotationInjected] == "true" &&
+		workloadclaims.IsSidecarContainer(ctr.GetName())
 }
 
 // writableKernelFS returns the destinations of sysfs and cgroup mounts that are
