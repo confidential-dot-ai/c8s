@@ -11,6 +11,12 @@ type mountRuleBehavior interface {
 	hostIndependent() bool
 }
 
+var (
+	_ mountRuleBehavior = emptyDirRule{}
+	_ mountRuleBehavior = dataRule{}
+	_ mountRuleBehavior = hostRule{}
+)
+
 func (r MountRule) behavior() mountRuleBehavior {
 	switch r.Kind {
 	case MountEmptyDir:
@@ -62,15 +68,13 @@ type hostRule struct {
 }
 
 func (r hostRule) validate() error {
-	if HostSourceDigest(r.Source) == "" {
-		return fmt.Errorf("host source %q must be a clean absolute path", r.Source)
-	}
-	return nil
+	_, err := HostSourceDigest(r.Source)
+	return err
 }
 
 func (r hostRule) admits(m ObservedMount) bool {
-	digest := HostSourceDigest(r.Source)
-	return digest != "" && m.HostSourceDigest == digest && m.ReadOnly == r.ReadOnly
+	digest, err := HostSourceDigest(r.Source)
+	return err == nil && m.HostSourceDigest == digest && m.ReadOnly == r.ReadOnly
 }
 
 func (hostRule) hostIndependent() bool {

@@ -2,7 +2,7 @@ package workloadclaims
 
 import (
 	"cmp"
-	"encoding/binary"
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -12,40 +12,24 @@ import (
 // The framing must be injective: a collision erases historical evidence and can
 // allow a sandbox to match a workload it did not actually run.
 func (c SandboxContainer) Key() string {
-	// Length-prefix every field and count argv elements. Preserve arbitrary
-	// argument bytes: JSON string encoding would collapse invalid UTF-8.
-	var b []byte
-	field := func(s string) { b = binary.AppendUvarint(b, uint64(len(s))); b = append(b, s...) }
-	field(c.Digest)
-	b = binary.AppendUvarint(b, uint64(len(c.Argv)))
-	for _, a := range c.Argv {
-		field(a)
-	}
+	var key strings.Builder
+	fmt.Fprintf(&key, "digest=%q argv=%q env=", c.Digest, c.Argv)
 	if c.Env == nil {
-		b = append(b, 0)
+		key.WriteString("nil")
 	} else {
-		b = append(b, 1)
-		field(c.Env.Format)
-		field(c.Env.Digest)
+		fmt.Fprintf(&key, "{%q %q}", c.Env.Format, c.Env.Digest)
 	}
+	key.WriteString(" mounts=")
 	if c.Mounts == nil {
-		b = append(b, 0)
+		key.WriteString("nil")
 	} else {
-		b = append(b, 1)
-		b = binary.AppendUvarint(b, uint64(len(c.Mounts)))
+		key.WriteByte('[')
 		for _, m := range c.Mounts {
-			field(m.Destination)
-			field(string(m.Class))
-			field(string(m.Storage))
-			field(m.HostSourceDigest)
-			if m.ReadOnly {
-				b = append(b, 1)
-			} else {
-				b = append(b, 0)
-			}
+			fmt.Fprintf(&key, "{%q %q %q %q %t}", m.Destination, m.Class, m.Storage, m.HostSourceDigest, m.ReadOnly)
 		}
+		key.WriteByte(']')
 	}
-	return string(b)
+	return key.String()
 }
 
 // Compare orders containers by digest, argv, then the full admission key.

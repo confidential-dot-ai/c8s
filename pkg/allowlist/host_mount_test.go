@@ -10,14 +10,22 @@ func TestHostMountPolicy(t *testing.T) {
 	if err := normalizeMounts(&policy); err != nil {
 		t.Fatal(err)
 	}
-	good := ObservedMount{Destination: "/config", Class: MountHost, Storage: MountUnknown, HostSourceDigest: HostSourceDigest("/etc/service"), ReadOnly: true}
+	sourceDigest, err := HostSourceDigest("/etc/service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, err := HostSourceDigest("/etc/other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := ObservedMount{Destination: "/config", Class: MountHost, Storage: MountUnknown, HostSourceDigest: sourceDigest, ReadOnly: true}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*ObservedMount)
 		want   bool
 	}{
 		{"pinned", func(*ObservedMount) {}, true},
-		{"source", func(m *ObservedMount) { m.HostSourceDigest = HostSourceDigest("/etc/other") }, false},
+		{"source", func(m *ObservedMount) { m.HostSourceDigest = otherDigest }, false},
 		{"missing source", func(m *ObservedMount) { m.HostSourceDigest = "" }, false},
 		{"destination", func(m *ObservedMount) { m.Destination = "/other" }, false},
 		{"writable", func(m *ObservedMount) { m.ReadOnly = false }, false},
@@ -55,5 +63,15 @@ func TestHostMountPolicy(t *testing.T) {
 	policy.Rules[0].Source = "/etc/service"
 	if err := normalizeMounts(&policy); err == nil {
 		t.Fatal("accepted host fields on emptyDir")
+	}
+}
+
+func TestHostSourceDigestRejectsInvalidPaths(t *testing.T) {
+	for _, source := range []string{"", "relative", "/etc/../service", "/etc/service/", "/etc/\x00service"} {
+		t.Run(source, func(t *testing.T) {
+			if _, err := HostSourceDigest(source); err == nil {
+				t.Fatalf("accepted invalid host source %q", source)
+			}
+		})
 	}
 }

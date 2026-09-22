@@ -89,7 +89,11 @@ func TestMountEvidenceJSONRoundTrip(t *testing.T) {
 }
 
 func TestHostMountIdentityRoundTrip(t *testing.T) {
-	mount := allowlist.ObservedMount{Destination: "/config", Class: allowlist.MountHost, Source: "/etc/service", HostSourceDigest: allowlist.HostSourceDigest("/etc/service"), ReadOnly: true}
+	sourceDigest, err := allowlist.HostSourceDigest("/etc/service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount := allowlist.ObservedMount{Destination: "/config", Class: allowlist.MountHost, Source: "/etc/service", HostSourceDigest: sourceDigest, ReadOnly: true}
 	c := SandboxContainer{Mounts: []allowlist.ObservedMount{mount}}
 	encoded, err := json.Marshal(c)
 	if err != nil {
@@ -107,10 +111,21 @@ func TestHostMountIdentityRoundTrip(t *testing.T) {
 	}
 	for _, source := range []string{"/etc/service", "/etc/other"} {
 		changed := mount
-		changed.HostSourceDigest = allowlist.HostSourceDigest(source)
+		changed.HostSourceDigest, err = allowlist.HostSourceDigest(source)
+		if err != nil {
+			t.Fatal(err)
+		}
 		changed.ReadOnly = source != "/etc/service"
 		if (SandboxContainer{Mounts: []allowlist.ObservedMount{changed}}).Key() == c.Key() {
 			t.Fatal("host authority collapsed in inventory key")
 		}
+	}
+}
+
+func TestContainerKeyDistinguishesMissingEnvironment(t *testing.T) {
+	missing := SandboxContainer{}
+	empty := SandboxContainer{Env: &allowlist.EnvObservation{}}
+	if missing.Key() == empty.Key() {
+		t.Fatal("missing environment collapsed into present evidence")
 	}
 }

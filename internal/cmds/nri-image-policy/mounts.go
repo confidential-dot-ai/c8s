@@ -205,7 +205,11 @@ func observeHostMount(m *api.Mount) allowlist.ObservedMount {
 			return mount
 		}
 	}
-	mount.HostSourceDigest = allowlist.HostSourceDigest(m.GetSource())
+	digest, err := allowlist.HostSourceDigest(m.GetSource())
+	if err != nil {
+		return mount
+	}
+	mount.HostSourceDigest = digest
 	return mount
 }
 
