@@ -110,19 +110,22 @@ func (cfg nodeImageRenderConfig) validate() error {
 	return nil
 }
 
+// nodeImageInput ties one image build flag to the chart value it pins.
+type nodeImageInput struct {
+	flag       string // build flag prefix, e.g. "cds-image"
+	valuePath  string // chart value the repository and digest are set under
+	repository string
+	digest     string
+	required   bool // the image must be pinned for the render to succeed
+}
+
 // images maps build flags to the chart's authoritative image values.
-func (cfg nodeImageRenderConfig) images() []struct {
-	flag, valuePath, repository, digest string
-	required                            bool
-} {
-	return []struct {
-		flag, valuePath, repository, digest string
-		required                            bool
-	}{
-		{"image", "image", cfg.imageRepository, cfg.imageDigest, true},
-		{"cds-image", "cds.image", cfg.cdsImageRepository, cfg.cdsImageDigest, true},
-		{"ratls-mesh-image", "ratlsMesh.image", cfg.ratlsMeshImageRepository, cfg.ratlsMeshImageDigest, true},
-		{"router-image", "router.nginx.image", cfg.routerImageRepository, cfg.routerImageDigest, false},
+func (cfg nodeImageRenderConfig) images() []nodeImageInput {
+	return []nodeImageInput{
+		{flag: "image", valuePath: "image", repository: cfg.imageRepository, digest: cfg.imageDigest, required: true},
+		{flag: "cds-image", valuePath: "cds.image", repository: cfg.cdsImageRepository, digest: cfg.cdsImageDigest, required: true},
+		{flag: "ratls-mesh-image", valuePath: "ratlsMesh.image", repository: cfg.ratlsMeshImageRepository, digest: cfg.ratlsMeshImageDigest, required: true},
+		{flag: "router-image", valuePath: "router.nginx.image", repository: cfg.routerImageRepository, digest: cfg.routerImageDigest},
 	}
 }
 

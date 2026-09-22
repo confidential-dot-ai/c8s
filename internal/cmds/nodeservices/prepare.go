@@ -190,16 +190,38 @@ func readPolicy(path, platform string, serverOnly bool) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("staged identity policy %s: %w", path, err)
 	}
-	family, err := teetypes.ParseFamily(platform)
-	if err != nil || pins.Family != family || len(pins.Images) == 0 || (serverOnly && len(pins.Images) != 1) {
+	if !policyMatchesPlatform(pins, platform, serverOnly) {
 		return nil, fmt.Errorf("staged identity policy %s has invalid family or image count", path)
 	}
-	for _, pin := range pins.Images {
-		if len(pin.Anchor) == 0 || (family == teetypes.FamilyTDX && (len(pin.Registers[1]) == 0 || len(pin.Registers[2]) == 0)) {
-			return nil, fmt.Errorf("staged identity policy %s requires complete image and operator pins", path)
-		}
+	if !policyPinsComplete(pins) {
+		return nil, fmt.Errorf("staged identity policy %s requires complete image and operator pins", path)
 	}
 	return data, nil
+}
+
+// policyMatchesPlatform reports whether the policy targets the booted TEE
+// family and pins the number of images the role permits: at least one, and
+// exactly one when the policy is server-only.
+func policyMatchesPlatform(pins refvalues.ReferenceValues, platform string, serverOnly bool) bool {
+	family, err := teetypes.ParseFamily(platform)
+	if err != nil || pins.Family != family || len(pins.Images) == 0 {
+		return false
+	}
+	return !serverOnly || len(pins.Images) == 1
+}
+
+// policyPinsComplete reports whether every image pin carries an anchor and,
+// on TDX, the kernel and operator registers the launch verifier compares.
+func policyPinsComplete(pins refvalues.ReferenceValues) bool {
+	for _, pin := range pins.Images {
+		if len(pin.Anchor) == 0 {
+			return false
+		}
+		if pins.Family == teetypes.FamilyTDX && (len(pin.Registers[1]) == 0 || len(pin.Registers[2]) == 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func mergedSeed(data []byte, workloads string) ([]byte, error) {
@@ -223,25 +245,27 @@ func mergedSeed(data []byte, workloads string) ([]byte, error) {
 // tenant workloads may never replace a component, even with identical content.
 func mergeWorkloads(base, extra *allowlist.Allowlist, allowIdentical bool) error {
 	for name, workload := range extra.Workloads {
-		if existing, exists := base.Workloads[name]; exists {
-			if allowIdentical {
-				old, err := json.Marshal(existing)
-				if err != nil {
-					return err
-				}
-				incoming, err := json.Marshal(workload)
-				if err != nil {
-					return err
-				}
-				// Both inputs were normalized by ParseJSON. Compare every
-				// field, so a collision cannot loosen the measured policy.
-				if bytes.Equal(old, incoming) {
-					continue
-				}
-			}
+		existing, exists := base.Workloads[name]
+		if !exists {
+			base.Workloads[name] = workload
+			continue
+		}
+		if !allowIdentical {
 			return fmt.Errorf("workload %q replaces a baked component", name)
 		}
-		base.Workloads[name] = workload
+		old, err := json.Marshal(existing)
+		if err != nil {
+			return err
+		}
+		incoming, err := json.Marshal(workload)
+		if err != nil {
+			return err
+		}
+		// Both inputs were normalized by ParseJSON. Compare every field, so
+		// a collision cannot loosen the measured policy.
+		if !bytes.Equal(old, incoming) {
+			return fmt.Errorf("workload %q replaces a baked component", name)
+		}
 	}
 	// Validate the combined document as well as each individual input.
 	if err := base.Normalize(); err != nil {
