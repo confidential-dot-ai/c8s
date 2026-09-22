@@ -96,7 +96,7 @@ func (c *Config) Validate() error {
 // ParsePins decodes --measurements and --rtmrs, warning when measurements are unpinned.
 func (c *Config) ParsePins() (ratls.Pins, error) {
 	policy, err := (cmdsutil.ImagePolicySource{File: c.MeasurementsConfig, JSON: c.MeasurementsConfigJSON}).Load(
-		cmdsutil.MeasurementPins{Measurements: c.Measurements, RTMRs: c.RTMRs})
+		cmdsutil.MeasurementPins{Measurements: c.Measurements, Registers: c.RTMRs})
 	if err != nil {
 		return ratls.Pins{}, err
 	}

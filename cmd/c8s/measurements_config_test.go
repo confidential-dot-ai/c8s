@@ -20,11 +20,11 @@ const (
 // installPins reads package-level flag vars, so each case restores them.
 func withInstallFlags(t *testing.T, config string, measurements, rtmrs []string) {
 	t.Helper()
-	origC, origM, origR := installMeasurementsConfig, installMeasurements, installRTMRs
+	origC, origM, origR := installMeasurementsConfig, installMeasurements, installRegisters
 	t.Cleanup(func() {
-		installMeasurementsConfig, installMeasurements, installRTMRs = origC, origM, origR
+		installMeasurementsConfig, installMeasurements, installRegisters = origC, origM, origR
 	})
-	installMeasurementsConfig, installMeasurements, installRTMRs = config, measurements, rtmrs
+	installMeasurementsConfig, installMeasurements, installRegisters = config, measurements, rtmrs
 }
 
 func writePinConfig(t *testing.T, doc string) string {

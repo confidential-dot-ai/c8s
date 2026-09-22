@@ -264,7 +264,7 @@ func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
 		return ratls.Pins{}, err
 	}
 	policy, err := (cmdsutil.ImagePolicySource{File: cfg.CDSMeasurementsConfig}).Load(
-		cmdsutil.MeasurementPins{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Prefix: "cds-"})
+		cmdsutil.MeasurementPins{Measurements: cfg.CDSMeasurements, Registers: cfg.CDSRTMRs, Prefix: "cds-"})
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("allowlist.pull: %w", err)
 	}

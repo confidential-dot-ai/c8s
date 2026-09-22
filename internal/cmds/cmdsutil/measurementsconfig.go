@@ -22,12 +22,13 @@ type ImagePolicySource struct {
 // IsSet reports whether a complete policy was supplied.
 func (s ImagePolicySource) IsSet() bool { return s.File != "" || s.JSON != "" }
 
-// MeasurementPins holds the independent digest/register inputs. Prefix is "cds-"
+// MeasurementPins holds the independent digest/register inputs. Registers
+// carries the raw --rtmrs values; which family they apply to is refvalues'. Prefix is "cds-"
 // for commands whose flags name CDS explicitly; otherwise it is empty.
 type MeasurementPins struct {
 	Measurements     []string
 	MeasurementsFile string
-	RTMRs            []string
+	Registers        []string
 	Prefix           string
 }
 
@@ -38,7 +39,7 @@ func MeasurementPinsFromStrings(measurements, rtmrs, prefix string) MeasurementP
 		pins.Measurements = strings.Split(measurements, ",")
 	}
 	if rtmrs != "" {
-		pins.RTMRs = strings.Split(rtmrs, ",")
+		pins.Registers = strings.Split(rtmrs, ",")
 	}
 	return pins
 }
@@ -51,7 +52,7 @@ func (p MeasurementPins) flags() []string {
 	if p.MeasurementsFile != "" {
 		flags = append(flags, "--measurements-file")
 	}
-	if len(p.RTMRs) > 0 {
+	if len(p.Registers) > 0 {
 		flags = append(flags, "--"+p.Prefix+"rtmrs")
 	}
 	return flags
@@ -126,7 +127,7 @@ func (s ImagePolicySource) Load(pins MeasurementPins) (remote.Policy, error) {
 	if err != nil {
 		return remote.Policy{}, fmt.Errorf("--%smeasurements: %w", pins.Prefix, err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(pins.RTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(pins.Registers)
 	if err != nil {
 		return remote.Policy{}, fmt.Errorf("--%srtmrs: %w", pins.Prefix, err)
 	}

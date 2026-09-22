@@ -48,9 +48,9 @@ func TestImagePolicySourceRejectsConflictingInputsBeforeReading(t *testing.T) {
 		for _, pins := range []MeasurementPins{
 			{Measurements: []string{"invalid"}},
 			{MeasurementsFile: "missing"},
-			{RTMRs: []string{"invalid"}},
+			{Registers: []string{"invalid"}},
 			{Measurements: []string{"invalid"}, Prefix: "cds-"},
-			{RTMRs: []string{"invalid"}, Prefix: "cds-"},
+			{Registers: []string{"invalid"}, Prefix: "cds-"},
 		} {
 			_, err := source.Load(pins)
 			if err == nil || !strings.Contains(err.Error(), "cannot be combined") || errors.Is(err, os.ErrNotExist) {
@@ -94,7 +94,7 @@ func TestMeasurementPolicySupportsDigestFileAndRegisterOnlyPins(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := ImagePolicySource{}
-	policy, err := source.Load(MeasurementPins{Measurements: []string{register}, MeasurementsFile: path, RTMRs: []string{"1=" + register}})
+	policy, err := source.Load(MeasurementPins{Measurements: []string{register}, MeasurementsFile: path, Registers: []string{"1=" + register}})
 	if err != nil || len(policy.Measurements) != 2 || len(policy.RTMRs[1]) != 48 || len(policy.Images) != 0 {
 		t.Fatalf("union/register policy changed: %+v, %v", policy, err)
 	}

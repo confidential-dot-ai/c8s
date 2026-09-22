@@ -130,7 +130,7 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 		return nil, err
 	}
 	policy, err := (cmdsutil.ImagePolicySource{File: cfg.measurementsConfig}).Load(
-		cmdsutil.MeasurementPins{Measurements: cfg.cdsMeasurements, RTMRs: cfg.cdsRTMRs, Prefix: "cds-"})
+		cmdsutil.MeasurementPins{Measurements: cfg.cdsMeasurements, Registers: cfg.cdsRTMRs, Prefix: "cds-"})
 	if err != nil {
 		return nil, err
 	}

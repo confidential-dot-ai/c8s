@@ -53,7 +53,7 @@ func run(cfg config) error {
 	// lists, so a config-mode start must fill them first.
 	pinned, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
 		Source:       cmdsutil.ImagePolicySource{File: cfg.measurementsConfig},
-		Pins:         cmdsutil.MeasurementPins{Measurements: cfg.measurements, RTMRs: cfg.rtmrs},
+		Pins:         cmdsutil.MeasurementPins{Measurements: cfg.measurements, Registers: cfg.rtmrs},
 		Platform:     cfg.ratlsPlatform,
 		PlatformFlag: "--ratls-platform",
 	})

@@ -16,7 +16,7 @@ import (
 // whether the set survives being flattened into one digest list and one map.
 func installPins() (digests [][]byte, registers map[int][]byte, helmArgs []string, err error) {
 	source := cmdsutil.ImagePolicySource{File: installMeasurementsConfig}
-	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, RTMRs: installRTMRs}
+	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, Registers: installRegisters}
 	if !source.IsSet() {
 		policy, err := source.Load(pins)
 		return policy.Measurements, policy.RTMRs, nil, err
