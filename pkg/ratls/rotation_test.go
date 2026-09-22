@@ -16,6 +16,31 @@ func (f rotationProviderFunc) Provision(ctx context.Context) (*tls.Certificate, 
 	return f(ctx)
 }
 
+func TestRotationReplacesCertificateWithoutParsedLeaf(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fresh := generateSimpleCert(t)
+		unparsed := *fresh
+		unparsed.Leaf = nil
+		m := &CertManager{state: &certState{
+			cert:     &unparsed,
+			rotateAt: time.Now().Add(time.Second),
+			provider: &mockProvider{cert: fresh, ttl: time.Hour},
+		}}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go m.RunRotation(ctx)
+		synctest.Wait()
+		if m.CertUsable() {
+			t.Fatal("certificate without a parsed leaf became usable before renewal")
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if !m.CertUsable() || !m.CertExpiry().Equal(fresh.Leaf.NotAfter) {
+			t.Fatal("worker did not replace the certificate without a parsed leaf")
+		}
+	})
+}
+
 func TestRotationRecoversAfterExpiryWithoutHandshakes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var fail atomic.Bool

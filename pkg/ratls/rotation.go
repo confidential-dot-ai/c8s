@@ -21,7 +21,7 @@ func (m *CertManager) RunRotation(ctx context.Context) {
 	for ctx.Err() == nil {
 		s.mu.RLock()
 		deadline := s.rotateAt
-		if s.cert != nil && s.cert.Leaf.NotAfter.Before(deadline) {
+		if s.cert != nil && s.cert.Leaf != nil && s.cert.Leaf.NotAfter.Before(deadline) {
 			deadline = s.cert.Leaf.NotAfter
 		}
 		if s.retryAt.After(deadline) {
