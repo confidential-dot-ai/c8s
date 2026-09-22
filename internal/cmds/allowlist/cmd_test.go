@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"

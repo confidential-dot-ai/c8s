@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/containerd/nri/pkg/api"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // Exercise containerd's create/start lifecycle for older admission tests.

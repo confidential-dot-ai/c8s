@@ -12,11 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/nri/pkg/api"
+
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
-	"github.com/containerd/nri/pkg/api"
 )
 
 func newTestPlugin(cfg *config) *plugin {

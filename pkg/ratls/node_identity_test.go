@@ -3,9 +3,9 @@ package ratls
 import (
 	"encoding/hex"
 	"errors"
-	"github.com/confidential-dot-ai/attestation-go/remote"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )

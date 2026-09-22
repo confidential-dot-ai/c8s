@@ -16,11 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"golang.org/x/time/rate"
 )
 
 func secretsRouter(t *testing.T, enabled bool) http.Handler {

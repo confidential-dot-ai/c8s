@@ -19,12 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/stub"
+
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
-	"github.com/containerd/nri/pkg/api"
-	"github.com/containerd/nri/pkg/stub"
 )
 
 // bindDeadResolver points the plugin at a real *ctrdresolver.Resolver on a socket

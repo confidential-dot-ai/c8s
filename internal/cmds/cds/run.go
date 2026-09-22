@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/remote"
@@ -33,7 +35,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
-	"golang.org/x/time/rate"
 )
 
 func run(cfg config) error {

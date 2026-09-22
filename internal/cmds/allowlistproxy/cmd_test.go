@@ -10,10 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
-
-	"strings"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )

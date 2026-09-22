@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 )
 
 func TestAccessLogEntryLogTo(t *testing.T) {

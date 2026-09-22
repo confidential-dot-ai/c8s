@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
@@ -18,7 +20,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
-	"golang.org/x/time/rate"
 )
 
 func newStubRouter(t *testing.T) http.Handler {

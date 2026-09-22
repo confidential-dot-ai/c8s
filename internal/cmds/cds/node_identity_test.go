@@ -2,14 +2,14 @@ package cds
 
 import (
 	"encoding/hex"
-	"github.com/confidential-dot-ai/attestation-go/remote"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"net/http"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
 func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {

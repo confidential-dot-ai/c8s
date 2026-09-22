@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
