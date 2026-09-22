@@ -176,10 +176,10 @@ func AddAgent(dir, name, serverAddress string) (err error) {
 		return err
 	}
 	if serverAddress == "" {
+		if server.Server.Address == "" {
+			return errors.New("--server-address is required: the server document leaves its address to autodetection, and an agent must be told where its server is")
+		}
 		serverAddress = server.Server.Address
-	}
-	if serverAddress == "" {
-		return errors.New("--server-address is required: the server document leaves its address to autodetection, and an agent must be told where its server is")
 	}
 	agent := *server
 	agent.Role = Agent
@@ -210,6 +210,9 @@ func imageFromManifest(path string, vcpus int) (Image, error) {
 			image.RTMRs[idx] = hex.EncodeToString(value[:])
 		}
 	case teetypes.FamilySNP:
+		// An SNP launch digest covers one vCPU count, so a manifest with a
+		// single variant still boots at exactly that count, not at any count.
+		// Omitting --vcpus takes that sole variant; it never means "all".
 		if vcpus == 0 && len(variants) > 1 {
 			return Image{}, fmt.Errorf("--vcpus is required: %s pins %d SNP launch digests, one per vCPU count", path, len(variants))
 		}

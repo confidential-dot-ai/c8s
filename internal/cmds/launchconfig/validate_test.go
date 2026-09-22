@@ -227,8 +227,13 @@ func TestLoadStagedTrustsOnlyCompleteArtifacts(t *testing.T) {
 	if _, err := LoadStaged(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("loaded a missing artifact")
 	}
-	if _, err := LoadStaged(write(t, []byte(`{"schemaVersion":"c8s-launch/v1","unknown":1}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
+	if _, err := LoadStaged(write(t, []byte(`{"schema_version":"c8s-launch/v1","unknown":1}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
 		t.Errorf("unknown field: %v", err)
+	}
+	// The staged artifact is JSON, so its camelCase YAML spelling is an
+	// unknown field here: a decoder that accepted both would not be strict.
+	if _, err := LoadStaged(write(t, []byte(`{"schemaVersion":"c8s-launch/v1"}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
+		t.Errorf("camelCase staged field: %v", err)
 	}
 	if _, err := LoadStaged(write(t, append(encode(t, doc), []byte("{}")...))); err == nil || !strings.Contains(err.Error(), "trailing data") {
 		t.Errorf("trailing data: %v", err)

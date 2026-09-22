@@ -53,38 +53,78 @@ const (
 // Document is the signed launch.yaml wire contract. All secrets are boot
 // inputs; agent documents must never carry the control-plane server token.
 type Document struct {
-	SchemaVersion           string       `yaml:"schemaVersion" json:"schemaVersion"`
-	ClusterID               string       `yaml:"clusterID" json:"clusterID"`
+	SchemaVersion           string       `yaml:"schemaVersion" json:"schema_version"`
+	ClusterID               string       `yaml:"clusterID" json:"cluster_id"`
 	Role                    Role         `yaml:"role" json:"role"`
 	Image                   Image        `yaml:"image" json:"image"`
 	Node                    Node         `yaml:"node" json:"node"`
 	RKE2                    RKE2         `yaml:"rke2" json:"rke2"`
 	Server                  ServerConfig `yaml:"server" json:"server"`
-	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agentOperatorPublicKeys"`
-	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tlsSAN"`
+	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agent_operator_public_keys"`
+	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tls_san"`
 	// Workloads is an optional strict c8s.allowlist/v1 JSON document. Keeping
 	// its existing wire schema avoids an independent YAML policy language.
 	Workloads          string `yaml:"workloads,omitempty" json:"workloads,omitempty"`
 	serverTokenPresent bool
 }
 
-// Image pins this boot's complete software identity; RTMR[0] varies by VM
-// shape and RTMR[3] binds its launch key, so neither belongs in these pins.
+// Image pins this boot's complete software identity. Platform names which
+// imagePlatform owns the rest: Measurement is the launch digest every platform
+// has, and RTMRs is the register map only some of them populate. RTMR[0] varies
+// by VM shape and RTMR[3] binds the launch key, so neither belongs in the pins.
 type Image struct {
 	Platform    string         `yaml:"platform" json:"platform"`
 	Measurement string         `yaml:"measurement" json:"measurement"`
 	RTMRs       map[int]string `yaml:"rtmrs,omitempty" json:"rtmrs,omitempty"`
 }
 
+// imagePlatform keeps each TEE's register rules in one place, so the shared
+// verify, validate and policy paths ask the platform instead of testing for
+// "tdx" inline. Adding a platform means adding an entry, not new branches.
+type imagePlatform struct {
+	family teetypes.Family
+	// validateRegisters rejects a register map that does not match what this
+	// platform measures. Its error names the platform's own rule.
+	validateRegisters func(rtmrs map[int]string) error
+}
+
+var imagePlatforms = map[string]imagePlatform{
+	"tdx": {
+		family: teetypes.FamilyTDX,
+		validateRegisters: func(rtmrs map[int]string) error {
+			if len(rtmrs) != 2 || !registerHex(rtmrs[1]) || !registerHex(rtmrs[2]) {
+				return fmt.Errorf("TDX image must pin exactly RTMR[1] and RTMR[2]")
+			}
+			return nil
+		},
+	},
+	"snp": {
+		family: teetypes.FamilySNP,
+		validateRegisters: func(rtmrs map[int]string) error {
+			if len(rtmrs) != 0 {
+				return fmt.Errorf("SNP image cannot carry RTMR pins")
+			}
+			return nil
+		},
+	},
+}
+
+// platform resolves the document's launch tag. Callers reach it only after
+// validate, which rejects any tag without an entry here.
+func (i Image) platform() (imagePlatform, bool) {
+	p, ok := imagePlatforms[i.Platform]
+	return p, ok
+}
+
 type Node struct {
 	Name       string `yaml:"name" json:"name"`
 	IP         string `yaml:"ip,omitempty" json:"ip,omitempty"`
-	ExternalIP string `yaml:"externalIP,omitempty" json:"externalIP,omitempty"`
+	ExternalIP string `yaml:"externalIP,omitempty" json:"external_ip,omitempty"`
 }
 
 type RKE2 struct {
-	ServerToken string `yaml:"serverToken,omitempty" json:"serverToken,omitempty"`
-	AgentToken  string `yaml:"agentToken" json:"agentToken"`
+	ServerToken string `yaml:"serverToken,omitempty" json:"server_token,omitempty"`
+	AgentToken  string `yaml:"agentToken" json:"agent_token"`
 }
 
 type ServerConfig struct {
@@ -92,7 +132,7 @@ type ServerConfig struct {
 	Address string `yaml:"address,omitempty" json:"address"`
 	// Exact PEM bytes are hardware-bound. Equivalent PEM encodings of one
 	// key are still one authorization identity, not two different roles.
-	OperatorPublicKey string `yaml:"operatorPublicKey" json:"operatorPublicKey"`
+	OperatorPublicKey string `yaml:"operatorPublicKey" json:"operator_public_key"`
 }
 
 // Config selects trusted local facilities and launch files. RootDir rebases
@@ -209,18 +249,15 @@ func (d *Document) validate() error {
 	if d.Role != Server && d.Role != Agent {
 		return fmt.Errorf("role must be server or agent")
 	}
-	if d.Image.Platform != "tdx" && d.Image.Platform != "snp" {
+	platform, ok := d.Image.platform()
+	if !ok {
 		return fmt.Errorf("image.platform must be tdx or snp")
 	}
 	if !registerHex(d.Image.Measurement) {
 		return fmt.Errorf("image.measurement must be 96 lowercase hex characters")
 	}
-	if d.Image.Platform == "tdx" {
-		if len(d.Image.RTMRs) != 2 || !registerHex(d.Image.RTMRs[1]) || !registerHex(d.Image.RTMRs[2]) {
-			return fmt.Errorf("TDX image must pin exactly RTMR[1] and RTMR[2]")
-		}
-	} else if len(d.Image.RTMRs) != 0 {
-		return fmt.Errorf("SNP image cannot carry RTMR pins")
+	if err := platform.validateRegisters(d.Image.RTMRs); err != nil {
+		return err
 	}
 	if d.Server.Address != "" || d.Role == Agent {
 		if err := ValidateIPv4(d.Server.Address, true); err != nil {
@@ -376,11 +413,11 @@ func readBounded(path string, limit int64) ([]byte, error) {
 }
 
 func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
-	tee := teetypes.FamilySNP
-	if d.Image.Platform == "tdx" {
-		tee = teetypes.FamilyTDX
+	platform, ok := d.Image.platform()
+	if !ok {
+		return refvalues.ReferenceValues{}, fmt.Errorf("image.platform must be tdx or snp")
 	}
-	pins := refvalues.ReferenceValues{Family: tee}
+	pins := refvalues.ReferenceValues{Family: platform.family}
 	keys := append([]string{d.Server.OperatorPublicKey}, d.AgentOperatorPublicKeys...)
 	for i, pub := range keys {
 		name := "server"
