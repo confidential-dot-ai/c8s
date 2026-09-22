@@ -43,23 +43,13 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 		return fmt.Errorf("baked workload seed: %w", err)
 	}
 	if d.Role == launchconfig.Server {
-		if net.ParseIP(d.TLSSAN) != nil {
-			return fmt.Errorf("staged TLS SAN must be a DNS hostname")
-		}
-		if err := cmdsutil.ValidateDNSName(d.TLSSAN); err != nil {
-			return fmt.Errorf("staged TLS SAN: %w", err)
-		}
-		pub := []byte(d.Server.OperatorPublicKey)
-		if _, err := operatorauth.ParsePublicKeysPEM(pub); err != nil {
-			return fmt.Errorf("staged server operator key: %w", err)
-		}
-		seed, err := mergedSeed(bakedData, d.Workloads)
+		server, err := serverOutputs(d, bakedData)
 		if err != nil {
 			return err
 		}
-		outputs["operator-pubkey"] = pub
-		outputs["allowlist-seed.json"] = seed
-		outputs["tls-san"] = []byte(d.TLSSAN + "\n")
+		for name, data := range server.files() {
+			outputs[name] = data
+		}
 	}
 
 	data, err := os.ReadFile(path("/usr/lib/c8s/image-policy.yaml"))
@@ -109,10 +99,8 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 		return err
 	}
 	if d.Role == launchconfig.Agent {
-		for _, name := range []string{"operator-pubkey", "allowlist-seed.json", "tls-san"} {
-			if err := os.Remove(filepath.Join(publicPath, name)); err != nil && !os.IsNotExist(err) {
-				return err
-			}
+		if err := removeServerOutputs(publicPath); err != nil {
+			return err
 		}
 	}
 	for name, data := range outputs {
@@ -125,6 +113,70 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 		return err
 	}
 	return fileutil.WriteAtomic(policyPath, data, 0600)
+}
+
+// serverConfig holds the inputs only a server publishes. An agent must never
+// carry them, so they are produced and removed as one named set rather than
+// as loose strings spread across Prepare.
+type serverConfig struct {
+	operatorPubKey []byte
+	allowlistSeed  []byte
+	tlsSAN         string
+}
+
+// serverOutputNames is the set both roles agree on: a server writes exactly
+// these, and an agent clears exactly these.
+var serverOutputNames = []string{"operator-pubkey", "allowlist-seed.json", "tls-san"}
+
+func (c serverConfig) files() map[string][]byte {
+	files := map[string][]byte{
+		"operator-pubkey":     c.operatorPubKey,
+		"allowlist-seed.json": c.allowlistSeed,
+		"tls-san":             []byte(c.tlsSAN + "\n"),
+	}
+	// A server output an agent does not clear would survive a demotion, so
+	// the two sets must not drift apart.
+	if len(files) != len(serverOutputNames) {
+		panic("serverConfig.files and serverOutputNames disagree")
+	}
+	for _, name := range serverOutputNames {
+		if _, ok := files[name]; !ok {
+			panic("serverOutputNames lists an unwritten server output: " + name)
+		}
+	}
+	return files
+}
+
+// serverOutputs validates the server-only fields of the staged document and
+// merges the operator's workloads over the baked seed. It writes nothing:
+// Prepare publishes only after every input has been validated.
+func serverOutputs(d *launchconfig.Document, bakedData []byte) (serverConfig, error) {
+	if net.ParseIP(d.TLSSAN) != nil {
+		return serverConfig{}, fmt.Errorf("staged TLS SAN must be a DNS hostname")
+	}
+	if err := cmdsutil.ValidateDNSName(d.TLSSAN); err != nil {
+		return serverConfig{}, fmt.Errorf("staged TLS SAN: %w", err)
+	}
+	pub := []byte(d.Server.OperatorPublicKey)
+	if _, err := operatorauth.ParsePublicKeysPEM(pub); err != nil {
+		return serverConfig{}, fmt.Errorf("staged server operator key: %w", err)
+	}
+	seed, err := mergedSeed(bakedData, d.Workloads)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	return serverConfig{operatorPubKey: pub, allowlistSeed: seed, tlsSAN: d.TLSSAN}, nil
+}
+
+// removeServerOutputs clears the server-only inputs from an agent's public
+// directory, so a node demoted to agent cannot keep serving stale ones.
+func removeServerOutputs(publicPath string) error {
+	for _, name := range serverOutputNames {
+		if err := os.Remove(filepath.Join(publicPath, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // readPolicy refuses partial pins even when the staged file parses. The
