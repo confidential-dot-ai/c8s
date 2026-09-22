@@ -109,7 +109,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Policy: remote.Policy{Images: cfg.CDSImages, Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Policy: remote.Policy{Images: cfg.CDSImages, Measurements: cfg.CDSMeasurements, Registers: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

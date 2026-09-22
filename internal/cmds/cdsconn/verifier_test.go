@@ -76,7 +76,7 @@ func TestImagePinVerifierRejectsMixedEntries(t *testing.T) {
 	// Both complete images are trusted, but their launch digest, registers,
 	// and anchor cannot be combined independently into a third trusted image.
 	pins.Images[1].Digest = bytes.Repeat([]byte{0xd4}, refvalues.DigestSize)
-	pins.Images[1].RTMRs = map[int][]byte{
+	pins.Images[1].Registers = map[int][]byte{
 		1: bytes.Repeat([]byte{0xe5}, refvalues.DigestSize),
 		2: bytes.Repeat([]byte{0xf6}, refvalues.DigestSize),
 	}
@@ -89,17 +89,17 @@ func TestImagePinVerifierRejectsMixedEntries(t *testing.T) {
 	}{
 		{"first image", 0, 0, 0, nil},
 		{"second image", 1, 1, 1, nil},
-		{"crossed registers", 0, 1, 0, remote.ErrRTMRNotAllowed},
+		{"crossed registers", 0, 1, 0, remote.ErrRegistersNotAllowed},
 		{"crossed anchor", 0, 0, 1, remote.ErrAnchorNotAllowed},
-		{"crossed digest", 1, 0, 0, remote.ErrRTMRNotAllowed},
+		{"crossed digest", 1, 0, 0, remote.ErrRegistersNotAllowed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seed := runtimemeasure.Seed(pins.Images[tc.anchor].Anchor)
 			report := &teetypes.VerificationResult{Platform: teetypes.PlatformTDX, SignatureValid: true}
 			report.Claims.LaunchDigest = hex.EncodeToString(pins.Images[tc.digest].Digest)
 			report.Claims.PlatformData = map[string]any{
-				"rtmr_1": hex.EncodeToString(pins.Images[tc.registers].RTMRs[1]),
-				"rtmr_2": hex.EncodeToString(pins.Images[tc.registers].RTMRs[2]),
+				"rtmr_1": hex.EncodeToString(pins.Images[tc.registers].Registers[1]),
+				"rtmr_2": hex.EncodeToString(pins.Images[tc.registers].Registers[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
 			o := Options{MeasurementsConfig: nodePolicyPath, Verifier: testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {

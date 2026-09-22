@@ -426,9 +426,9 @@ func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
 		}
 		entry := remote.ImagePin{Name: name, Digest: mustDecodeHex(d.Image.Measurement), Anchor: []byte(pub)}
 		if len(d.Image.RTMRs) > 0 {
-			entry.RTMRs = make(map[int][]byte, len(d.Image.RTMRs))
+			entry.Registers = make(map[int][]byte, len(d.Image.RTMRs))
 			for idx, digest := range d.Image.RTMRs {
-				entry.RTMRs[idx] = mustDecodeHex(digest)
+				entry.Registers[idx] = mustDecodeHex(digest)
 			}
 		}
 		pins.Images = append(pins.Images, entry)

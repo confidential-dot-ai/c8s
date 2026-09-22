@@ -16,7 +16,7 @@ func TestPullAndInventoryUseCompleteCDSPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pins.Images) != 2 || len(pins.Images[0].Anchor) == 0 || len(pins.Images[0].RTMRs) != 2 {
+	if len(pins.Images) != 2 || len(pins.Images[0].Anchor) == 0 || len(pins.Images[0].Registers) != 2 {
 		t.Fatal("CDS policy lost part of its image/operator tuple")
 	}
 	if _, err := allowlistPullHTTPClient(cfg.Allowlist.Pull); err != nil {

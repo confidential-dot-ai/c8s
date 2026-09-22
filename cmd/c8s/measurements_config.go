@@ -19,7 +19,7 @@ func installPins() (digests [][]byte, registers map[int][]byte, helmArgs []strin
 	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, Registers: installRegisters}
 	if !source.IsSet() {
 		policy, err := source.Load(pins)
-		return policy.Measurements, policy.RTMRs, nil, err
+		return policy.Measurements, policy.Registers, nil, err
 	}
 	set, err := source.LoadValues(pins)
 	if err != nil {
@@ -35,7 +35,7 @@ func installPins() (digests [][]byte, registers map[int][]byte, helmArgs []strin
 	if set.HasAnchors() {
 		return nil, nil, nil, fmt.Errorf("approver_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
 	}
-	common, uniform := set.CommonRTMRs()
+	common, uniform := set.CommonRegisters()
 	if !uniform {
 		return nil, nil, nil, fmt.Errorf("--image-policy-file contains different register pins per image; Helm installation requires identical register pins because the NRI installer accepts one shared register set")
 	}

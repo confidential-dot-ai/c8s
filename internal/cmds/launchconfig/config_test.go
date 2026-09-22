@@ -151,7 +151,7 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					if !bytes.Equal(entry.Digest, mustDecodeHex(doc.Image.Measurement)) {
 						t.Fatal("peer policy changed the shared image")
 					}
-					if platform == "tdx" && len(entry.RTMRs) != 2 {
+					if platform == "tdx" && len(entry.Registers) != 2 {
 						t.Fatal("TDX peer omitted runtime image pins")
 					}
 				}

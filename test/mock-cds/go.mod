@@ -3,7 +3,7 @@ module github.com/confidential-dot-ai/c8s/test/mock-cds
 go 1.27.0
 
 require (
-	github.com/confidential-dot-ai/attestation-go v0.7.1
+	github.com/confidential-dot-ai/attestation-go v0.7.2
 	github.com/confidential-dot-ai/c8s v0.0.0
 )
 

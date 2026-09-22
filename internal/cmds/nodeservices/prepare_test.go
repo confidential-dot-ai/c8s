@@ -148,7 +148,7 @@ func TestPrepareRejectsMissingOrPartialIdentityPolicies(t *testing.T) {
 					case "unanchored":
 						pins.Images[0].Anchor = nil
 					case "missing-rtmr":
-						delete(pins.Images[0].RTMRs, 2)
+						delete(pins.Images[0].Registers, 2)
 					case "server-includes-agent":
 						if name != "cds.json" {
 							return
@@ -157,7 +157,7 @@ func TestPrepareRejectsMissingOrPartialIdentityPolicies(t *testing.T) {
 					case "wrong-family":
 						pins.Family = teetypes.FamilySNP
 						for i := range pins.Images {
-							pins.Images[i].RTMRs = nil
+							pins.Images[i].Registers = nil
 						}
 					}
 					data, err := refvalues.Format(pins)

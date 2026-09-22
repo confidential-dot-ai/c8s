@@ -68,7 +68,7 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 	if _, err := refvalues.ParseHexMeasurements(c.measurements); err != nil {
 		t.Errorf("flat measurements do not parse: %v", err)
 	}
-	if _, err := refvalues.ParseRTMRPinsString(c.rtmrs); err != nil {
+	if _, err := refvalues.ParseRegisterPinsString(c.rtmrs); err != nil {
 		t.Errorf("flat rtmrs do not parse: %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestResolveDropsDivergentRTMRs(t *testing.T) {
 		t.Errorf("--measurements = %q, want both digests", c.measurements)
 	}
 	for _, img := range set.Images {
-		if len(img.RTMRs) == 0 {
+		if len(img.Registers) == 0 {
 			t.Errorf("entry %s lost its register pins", img.Name)
 		}
 	}
