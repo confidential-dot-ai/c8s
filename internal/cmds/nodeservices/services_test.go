@@ -9,10 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"gopkg.in/yaml.v3"
 )
 
 func testPins(t *testing.T) refvalues.ReferenceValues {

@@ -15,16 +15,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/nodeservices"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/distribution/reference"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
+
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/nodeservices"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 var (

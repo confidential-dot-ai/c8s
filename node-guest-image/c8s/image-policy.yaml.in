@@ -285,8 +285,8 @@ policy:
   # nri-image-policy installer) legitimately use hostPath and hostNetwork, and
   # they reach this plugin through the CDS-served document rather than through
   # the base above, so enforcing today would deny them. Resolve their digests
-  # from C8S_REF into the base the way @CDS_DIGEST@ already is, then set this
-  # to "enforce".
+  # into the measured base the way boot preparation already merges the
+  # chart-derived component seed, then set this to "enforce".
   sandbox: "audit"
   label_rules: []
 
