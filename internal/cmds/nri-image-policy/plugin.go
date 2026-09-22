@@ -515,6 +515,10 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 // sense on the spec containerd persisted: CreateContainer precedes the other
 // plugins' adjustments, and the adjustment validator sees those edits applied
 // to a clone's env, argv and mounts alone (env.go, adjustedLaunchContainer).
+//
+// A sandbox denial is never downgraded by exemptNamespace: the snapshot says
+// which digests ran in the namespace, and host privilege is a property of the
+// pod spec, not of the image. Only the measured node TCB excuses it.
 func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase) (imageVerdict, string) {
 	var mounts []allowlist.ObservedMount
 	if phase == launchFinal {
@@ -525,7 +529,7 @@ func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.
 		return verdict, reason
 	}
 	if v, r := p.checkSandbox(ctx, cfg, pod, ctr, imageRef); v == verdictDeny {
-		return p.exemptNamespace(ctx, cfg, pod, ctr, imageRef, v, r)
+		return v, r
 	}
 	return verdict, reason
 }

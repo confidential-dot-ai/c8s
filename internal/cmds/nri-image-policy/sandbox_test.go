@@ -2,6 +2,7 @@ package nriimagepolicy
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -403,5 +404,23 @@ func TestSandboxRunsOnlyInTheFinalPhase(t *testing.T) {
 				t.Fatalf("checkContainerPhase(phase=%d) = %d %q, want %d", tt.phase, verdict, reason, tt.want)
 			}
 		})
+	}
+}
+
+// A sandbox denial is not downgraded in an exempt namespace, even when the
+// digest is in the frozen snapshot: the snapshot admits an image, not host
+// privilege.
+func TestSandboxDenialIsNotNamespaceExempt(t *testing.T) {
+	p := exemptPlugin(t, filepath.Join(t.TempDir(), "snap.json"), "kube-system")
+	snap := newExemptSnapshot([]string{"kube-system"})
+	snap.add("kube-system", pushDigestA)
+	p.exempt.Store(snap)
+	p.cfg.Policy.Sandbox = SandboxEnforce
+
+	pod := sandboxedPod()
+	pod.Namespace = "kube-system"
+	verdict, reason := p.checkContainer(context.Background(), p.cfg, pod, privilegedContainer(), testFloorImage)
+	if verdict != verdictDeny || !strings.Contains(reason, "host path bind mount") {
+		t.Fatalf("checkContainer(exempt namespace, privileged) = %d %q, want deny naming the violation", verdict, reason)
 	}
 }

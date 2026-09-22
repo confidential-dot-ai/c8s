@@ -364,7 +364,9 @@ and the exemption belongs to whoever measured them.
 
 `allowlist.node_tcb: true` in the plugin's boot config marks that config's
 `allowlist.base` document as the node TCB: its digests are exempt, and nothing
-else is. The node image sets it because its base is measured with the image
+else is. `policy.exempt_namespaces` does not reach it: the frozen snapshot
+admits an image the allowlist would deny, never a host privilege the pod spec
+claims. The node image sets it because its base is measured with the image
 (`node-guest-image/c8s/image-policy.yaml.in`). A chart-rendered boot config
 must not: that base comes from chart values, which the cluster admin the
 policy defends against chooses.
