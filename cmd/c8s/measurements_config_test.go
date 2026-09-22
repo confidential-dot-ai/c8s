@@ -75,14 +75,14 @@ func TestInstallPinsRefusesToDropOperatorIdentity(t *testing.T) {
 	}
 }
 
-// NRI receives a shared RTMR set, so nonuniform image policies must be refused.
-func TestInstallPinsRejectsDivergentRTMRs(t *testing.T) {
+// NRI receives one shared register set, so nonuniform image policies must be refused.
+func TestInstallPinsRejectsDivergentRegisters(t *testing.T) {
 	path := writePinConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
 		{"name":"a","mrtd":"00`+pinDigestA+`","rtmr":[null,"`+pinReg1+`"]},
 		{"name":"b","mrtd":"00`+pinDigestB+`","rtmr":[null,"`+pinReg2+`"]}]}`)
 	withInstallFlags(t, path, nil, nil)
-	if digests, rtmrs, args, err := installPins(); err == nil || !strings.Contains(err.Error(), "identical RTMR pins") || len(digests)+len(rtmrs)+len(args) != 0 {
-		t.Fatalf("divergent RTMR policy was weakened: digests=%v rtmrs=%v args=%v err=%v", digests, rtmrs, args, err)
+	if digests, rtmrs, args, err := installPins(); err == nil || !strings.Contains(err.Error(), "identical register pins") || len(digests)+len(rtmrs)+len(args) != 0 {
+		t.Fatalf("divergent register policy was weakened: digests=%v rtmrs=%v args=%v err=%v", digests, rtmrs, args, err)
 	}
 }
 

@@ -20,8 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -29,7 +27,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"

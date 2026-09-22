@@ -12,7 +12,9 @@ import (
 // installPins resolves the pins install supplies to the chart. Complete policies
 // must also be expressible by the NRI installer's digest/common-register inputs;
 // reject policies that would lose an image's register or launch-key constraint.
-func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
+// Which TEE family pins which registers is refvalues' business; this only asks
+// whether the set survives being flattened into one digest list and one map.
+func installPins() (digests [][]byte, registers map[int][]byte, helmArgs []string, err error) {
 	source := cmdsutil.ImagePolicySource{File: installMeasurementsConfig}
 	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, RTMRs: installRTMRs}
 	if !source.IsSet() {
@@ -35,7 +37,7 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 	}
 	common, uniform := set.CommonRTMRs()
 	if !uniform {
-		return nil, nil, nil, fmt.Errorf("--image-policy-file contains different RTMR pins per image; Helm installation requires identical RTMR pins because the NRI installer accepts one shared register set")
+		return nil, nil, nil, fmt.Errorf("--image-policy-file contains different register pins per image; Helm installation requires identical register pins because the NRI installer accepts one shared register set")
 	}
 	// The chart takes the file's content; helm reads the same path this
 	// command just validated.
