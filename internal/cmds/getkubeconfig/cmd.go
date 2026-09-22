@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/spf13/cobra"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 )
 
 // NewCmd builds the `get-kubeconfig` subcommand: the operator-side client that
