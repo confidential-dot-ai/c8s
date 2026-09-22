@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -500,12 +501,28 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, launchFinal)
 }
 
+// checkContainerPhase adds the sandbox policy to the final phase. That policy
+// reads the whole container spec — mounts, devices, hooks — so it only makes
+// sense on the spec containerd persisted: CreateContainer precedes the other
+// plugins' adjustments, and the adjustment validator sees those edits applied
+// to a clone's env, argv and mounts alone (env.go, adjustedLaunchContainer).
+//
+// A sandbox denial is never downgraded by exemptNamespace: the snapshot says
+// which digests ran in the namespace, and host privilege is a property of the
+// pod spec, not of the image. Only the measured node TCB excuses it.
 func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase) (imageVerdict, string) {
 	var mounts []allowlist.ObservedMount
 	if phase == launchFinal {
 		mounts = newMountObserver(nil).Observe(pod, ctr)
 	}
-	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr), mounts)
+	verdict, reason := p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr), mounts)
+	if verdict == verdictDeny || phase != launchFinal || !cfg.sandboxObserved() {
+		return verdict, reason
+	}
+	if v, r := p.checkSandbox(ctx, cfg, pod, ctr, imageRef, containerEnv(ctr), mounts); v == verdictDeny {
+		return v, r
+	}
+	return verdict, reason
 }
 
 func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) (imageVerdict, string) {
@@ -523,37 +540,113 @@ func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *a
 			Mounts:    mounts,
 		}, phase)
 	}
+	return p.exemptNamespace(ctx, cfg, pod, ctr, imageRef, verdict, reason)
+}
 
-	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
-		digest := p.resolveDigest(ctx, imageRef)
-		if p.exempt.Load().admits(namespace, digest) {
-			p.logger.Info("exempt namespace: admitting a container whose digest was captured running here",
-				"namespace", namespace, "pod", podName, "container", ctrName, "digest", digest, "denial", reason)
-			p.audit.Log(audit.Event{
-				Action:    "allow",
-				Reason:    "namespace_exempt",
-				Overrides: reason,
-				Namespace: namespace,
-				Pod:       podName,
-				Container: ctrName,
-				Image:     imageRef,
-			})
-			return verdictSkip, ""
-		}
-		// Exempt namespace, digest not in the frozen snapshot: a drifted or
-		// newly-introduced image. Denied (and never killed — see checkExisting),
-		// audited under a distinct reason so drift is alertable from the log.
+// exemptNamespace downgrades a denial to skip when the container's digest was
+// captured running in that exempt namespace (the frozen snapshot), and only
+// then. It runs last, only downgrades, and is keyed on the resolved digest — a
+// local fact — not the namespace name the control plane chooses.
+func (p *plugin) exemptNamespace(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, verdict imageVerdict, reason string) (imageVerdict, string) {
+	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
+	if verdict != verdictDeny || !slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
+		return verdict, reason
+	}
+
+	digest := p.resolveDigest(ctx, imageRef)
+	if p.exempt.Load().admits(namespace, digest) {
+		p.logger.Info("exempt namespace: admitting a container whose digest was captured running here",
+			"namespace", namespace, "pod", podName, "container", ctrName, "digest", digest, "denial", reason)
 		p.audit.Log(audit.Event{
-			Action:    "deny",
-			Reason:    "exempt_snapshot_miss",
+			Action:    "allow",
+			Reason:    "namespace_exempt",
+			Overrides: reason,
 			Namespace: namespace,
 			Pod:       podName,
 			Container: ctrName,
 			Image:     imageRef,
 		})
+		return verdictSkip, ""
+	}
+	// Exempt namespace, digest not in the frozen snapshot: a drifted or
+	// newly-introduced image. Denied (and never killed — see checkExisting),
+	// audited under a distinct reason so drift is alertable from the log.
+	p.audit.Log(audit.Event{
+		Action:    "deny",
+		Reason:    "exempt_snapshot_miss",
+		Namespace: namespace,
+		Pod:       podName,
+		Container: ctrName,
+		Image:     imageRef,
+	})
+	return verdict, reason
+}
+
+// checkSandbox applies the fixed host-privilege policy: a container may not
+// hold a host namespace, a host bind mount, a device, a CDI injection, an OCI
+// hook or the marks of a privileged container. The allowlist bounds which bytes
+// run; this bounds what those bytes are handed.
+//
+// Only the MEASURED base allowlist is exempt, and only when the node config
+// claims it as the node TCB (allowlist.node_tcb). A CDS-served entry never is: the
+// document is authored by the cluster admin this policy defends against.
+//
+// The exemption is the whole base entry — digest, argv, env and mounts — not
+// the digest alone: the control plane picks the image a pod runs, so a TCB
+// image restaged with another entrypoint is a tenant container, and an entry
+// with a pinned argv refuses it. An entry left at `any` exempts every launch of
+// its digest; see docs/allowlist-and-capabilities.md.
+//
+// The digest is resolved only when there is something to excuse, so an ordinary
+// container costs no containerd round-trip.
+func (p *plugin) checkSandbox(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) (imageVerdict, string) {
+	obs := observeSandbox(pod, ctr, cfg.WorkloadClaims.SocketDir)
+	violations := obs.violations()
+	if len(violations) == 0 {
+		return verdictAllow, ""
+	}
+	digest := ""
+	if cfg.Allowlist.NodeTCB {
+		digest = p.resolveDigest(ctx, imageRef)
+		rc := allowlist.RunningContainer{Digest: digest, Argv: ctr.GetArgs(), Env: env, Mounts: mounts}
+		if p.policy.baseAdmits(rc, launchFinal) {
+			return verdictAllow, ""
+		}
 	}
 
-	return verdict, reason
+	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
+	// INVARIANT: the log carries the whole observation so a reviewer can write
+	// the missing node-TCB rule from it; the returned reason reaches a
+	// namespace-readable kubelet event and names only the violated rules, which
+	// are the pod's own spec.
+	p.logger.Warn("container holds host privilege outside the node TCB",
+		append([]any{
+			"namespace", namespace, "pod", podName, "container", ctrName,
+			"image", imageRef, "digest", digest,
+			"violations", violations, "sandbox", cfg.sandboxMode(),
+		}, obs.logAttrs()...)...)
+	if cfg.sandboxMode() == SandboxAudit {
+		p.audit.Log(audit.Event{
+			Action:    "allow",
+			Reason:    "sandbox_audit",
+			Overrides: strings.Join(violations, ", "),
+			Namespace: namespace,
+			Pod:       podName,
+			Container: ctrName,
+			Image:     imageRef,
+		})
+		return verdictAllow, ""
+	}
+	p.audit.Log(audit.Event{
+		Action:    "deny",
+		Reason:    "sandbox_violation",
+		Rule:      strings.Join(violations, ", "),
+		Namespace: namespace,
+		Pod:       podName,
+		Container: ctrName,
+		Image:     imageRef,
+	})
+	return verdictDeny, fmt.Sprintf("container is not part of the node TCB and requests host privilege: %s", strings.Join(violations, ", "))
 }
 
 // shouldCheckExisting reports whether the startup check has work — enforcement,

@@ -321,15 +321,94 @@ filesystem once a value is inside it — so a grant names store paths only. An
 install still setting the per-container `paths` field needs
 [`secrets.md`](secrets.md#upgrading).
 
+## Host privilege
+
+The allowlist bounds which bytes run. It says nothing about what those bytes
+are *handed*, and on a node CVM that is the whole difference between a tenant
+container and node root: `privileged: true`, `hostNetwork`, a `hostPath` of
+`/`, or a device node all give an allowlisted image the node's memory, the
+volume plaintext and the admission plugin itself. Pod Security Admission in the
+node image does not close it — it is control-plane admission, and the operator
+owns the control plane.
+
+So the NRI plugin applies a second, fixed policy to every container: the
+**sandbox policy**. It is not a language for modelling OCI fields; it is one
+rule shared by every workload, checked on the OCI spec containerd persisted —
+the same final phase the env check runs in, after every plugin's adjustments.
+A container is denied when it holds any of:
+
+- a host ipc, network, pid or uts namespace;
+- a bind mount whose source the pod does not own — every mount the kubelet and
+  containerd stage lives under the pod's kubelet directory
+  (`/var/lib/kubelet/pods/<uid>/`) or its containerd sandbox directory, matched
+  as a clean-path prefix, so anything else is a `hostPath`;
+- a device node, a CDI device, or a host network device moved in;
+- an OCI hook, which names code outside the reviewed image and entrypoint;
+- a container sysctl;
+- the marks of a privileged container: no cgroup namespace, or a writable
+  `sysfs`/`cgroupfs` mount.
+
+A missing pod or container spec reads as every violation at once: unobservable
+is denied, not assumed safe. Denials log the whole observation node-locally, so
+a reviewer can write the missing rule from the record; the message the kubelet
+surfaces names only the violated rules, which are the pod's own spec.
+
+`policy.sandbox` selects `enforce` (deny), `audit` (record and admit) or `off`
+(do not observe). A parsed config with no value enforces.
+
+### What the node TCB is, and who may declare it
+
+Some containers must hold host privilege — the RKE2 static pods, Cilium,
+c8s's own node-level components. They are the node's trusted computing base,
+and the exemption belongs to whoever measured them.
+
+`allowlist.node_tcb: true` in the plugin's boot config marks that config's
+`allowlist.base` document as the node TCB: a container that base admits —
+digest, argv, env and mounts together — is exempt, and nothing else is. `policy.exempt_namespaces` does not reach it: the frozen snapshot
+admits an image the allowlist would deny, never a host privilege the pod spec
+claims. The node image sets it because its base is measured with the image
+(`node-guest-image/c8s/image-policy.yaml.in`). A chart-rendered boot config
+must not: that base comes from chart values, which the cluster admin the
+policy defends against chooses.
+
+A CDS-served document cannot express the marker: it is a boot-config key, not
+an allowlist field, and both allowlist parse paths reject unknown fields.
+Node-TCB status is a property of a measured boot config, never of a document.
+
+### What NRI does not show
+
+NRI v0.12.3 (`api.LinuxContainer`) carries namespaces, devices, mounts,
+hooks, CDI devices, sysctls, net devices and the seccomp policy. It does **not**
+carry the fields containerd also generates: Linux capabilities, the `privileged`
+flag itself, `no_new_privs`, masked and readonly paths, the AppArmor profile,
+and a read-only root. So this policy *infers* privilege from the cgroup
+namespace and writable `sysfs`, and cannot see a capability set at all — a pod
+adding `CAP_SYS_ADMIN` without any other privilege passes. Closing that needs
+the enforcement point to read `config.json` directly, not the NRI view.
+
+Two more limits: the host user namespace is the Kubernetes default, so its
+absence is no evidence and `hostUsers: false` is not required; and a cgroup v1
+node has no cgroup namespace on any container, so the privileged inference
+would refuse everything there.
+
+The exemption is only as narrow as the base entry. The node image's generated
+system entries admit their digests under `command`, `args` and `mounts` of
+`any`, so the control plane can restage one of those images — several ship a
+shell — as a privileged tenant pod and the base admits it. Closing that means
+pinning argv in the generated entries, which is systemfloor's to do; the
+plugin already matches the whole entry, so a pin takes effect as soon as it is
+measured.
+
 ## Where it's enforced
 
 Two independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), per container. Resolves the image
    digest and checks the effective argv at creation, validates env after
-   cumulative NRI adjustments, and rechecks the final OCI spec before start.
-   Fail-closed before the allowlist first loads; the plugin runs inside the
-   node CVM and is the primary admission gate.
+   cumulative NRI adjustments, and rechecks the final OCI spec before start —
+   where it also applies the sandbox policy above. Fail-closed before the
+   allowlist first loads; the plugin runs inside the node CVM and is the
+   primary admission gate.
 
 2. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
