@@ -7,14 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/helmchart"
-
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 func TestBuildHelmUninstallArgs(t *testing.T) {

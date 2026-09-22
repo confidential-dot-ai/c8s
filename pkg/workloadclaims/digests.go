@@ -11,23 +11,22 @@ package workloadclaims
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"io"
-	"io/fs"
-	"net"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
-
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )

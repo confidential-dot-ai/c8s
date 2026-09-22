@@ -14,8 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +22,8 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"

@@ -23,7 +23,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 

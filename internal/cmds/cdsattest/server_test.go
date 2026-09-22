@@ -17,10 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
-	"github.com/fxamacker/cbor/v2"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {

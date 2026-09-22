@@ -3,13 +3,13 @@ package verify
 import (
 	"encoding/hex"
 	"errors"
-	"github.com/confidential-dot-ai/attestation-go/remote"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 

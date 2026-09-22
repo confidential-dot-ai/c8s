@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/containerd/nri/pkg/api"
+
+	"github.com/confidential-dot-ai/c8s/internal/audit"
 )
 
 // exemptPlugin builds a fail-closed base plugin (base allowlist admits pushDigestA)

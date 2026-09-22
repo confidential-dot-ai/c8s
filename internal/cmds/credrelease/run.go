@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"golang.org/x/net/netutil"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
