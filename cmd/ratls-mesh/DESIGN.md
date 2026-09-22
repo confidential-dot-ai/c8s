@@ -538,7 +538,7 @@ prometheus.io/path: "/metrics"
 
 ## Certificate Lifecycle
 
-Certificates are provisioned lazily on the first TLS handshake and cached in memory:
+Certificates are provisioned after the mesh listeners bind and cached in memory:
 
 1. Generate ECDSA P-256 key pair
 2. Compute `REPORTDATA = SHA-384(pubkey || nonce)`
@@ -546,9 +546,9 @@ Certificates are provisioned lazily on the first TLS handshake and cached in mem
 4. Extract raw attestation report from the structured evidence response
 5. Embed attestation report in X.509 certificate extension
 6. Cache certificate in `certState` (RWMutex-protected)
-7. Rotate at 50% of TTL (default 24h → rotate at 12h)
+7. Renew each certificate on a timer at 50% of TTL (default 24h → rotate at 12h)
 
-The `certState.mu` mutex serializes certificate provisioning — at most one attestation process runs at a time per cert type (server/client). After the first provisioning, the cached cert is returned for all subsequent handshakes until rotation.
+Each certificate manager renews independently of traffic and retries failures through expiry. Valid cached certificates remain available during renewal. Expired certificates fail readiness, while timer-driven retries continue.
 
 ### CDS-Issued Certificates
 
