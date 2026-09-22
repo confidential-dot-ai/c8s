@@ -98,6 +98,8 @@ type MountPolicy struct {
 type MountRule struct {
 	Destination string     `json:"destination" yaml:"destination"`
 	Kind        MountClass `json:"kind" yaml:"kind"`
+	Source      string     `json:"source,omitempty" yaml:"source,omitempty"`
+	ReadOnly    bool       `json:"readOnly,omitempty" yaml:"readOnly,omitempty"`
 }
 
 // MountClass identifies who controls the content behind a bind mount.
@@ -454,16 +456,11 @@ func normalizeMountRules(rules []MountRule) error {
 }
 
 func validateMountRuleKind(r MountRule) error {
-	switch r.Kind {
-	case MountEmptyDir:
-	case MountData:
-		if !strings.HasPrefix(r.Destination, DataMountPrefix) {
-			return fmt.Errorf("data destination %q must be below %s", r.Destination, DataMountPrefix)
-		}
-	default:
+	behavior := r.behavior()
+	if behavior == nil {
 		return fmt.Errorf("mount destination %q has unsupported kind %q", r.Destination, r.Kind)
 	}
-	return nil
+	return behavior.validate()
 }
 
 func normalizeEnv(p *EnvPolicy) error {

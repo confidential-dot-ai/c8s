@@ -17,12 +17,11 @@ import (
 )
 
 const (
-	serverMarker        = "/run/confos/role-server"
-	agentMarker         = "/run/confos/role-agent"
-	serverTokenPath     = "/run/confos/rke2-server-token"
-	agentTokenPath      = "/run/confos/rke2-agent-token"
-	rke2FragmentPath    = "/etc/rancher/rke2/config.yaml.d/50-role.yaml"
-	runtimeManifestPath = "/var/lib/rancher/rke2/server/manifests/c8s-node-runtime.yaml"
+	serverMarker     = "/run/confos/role-server"
+	agentMarker      = "/run/confos/role-agent"
+	serverTokenPath  = "/run/confos/rke2-server-token"
+	agentTokenPath   = "/run/confos/rke2-agent-token"
+	rke2FragmentPath = "/etc/rancher/rke2/config.yaml.d/50-role.yaml"
 )
 
 // Stage authenticates the launch document and writes only fixed boot paths.
@@ -53,7 +52,7 @@ func clearOutputs(cfg Config) error {
 	// output fails. Collect errors so a blocked first marker never prevents
 	// attempting to remove the other.
 	var errs []error
-	paths := []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, rke2FragmentPath, runtimeManifestPath}
+	paths := []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, rke2FragmentPath}
 	for _, name := range []string{"peers.json", "cds.json", "operator-pubkey", "config.json", "workloads.json"} {
 		paths = append(paths, Dir+"/"+name)
 	}
@@ -116,13 +115,8 @@ func stageVerified(cfg Config, v *Verified) error {
 	}
 	marker := agentMarker
 	if doc.Role == Server {
-		manifest, err := runtimeManifest(doc, cds)
-		if err != nil {
-			return err
-		}
 		outputs = append(outputs,
 			outputFile{serverTokenPath, []byte(doc.RKE2.ServerToken)},
-			outputFile{runtimeManifestPath, manifest},
 		)
 		marker = serverMarker
 	}
@@ -159,25 +153,6 @@ func rke2Fragment(doc *Document) roleFragment {
 		out.Server = "https://" + doc.Server.Address + ":9345"
 	}
 	return out
-}
-
-func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
-	manifest := struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
-		Metadata   struct {
-			Name      string `yaml:"name"`
-			Namespace string `yaml:"namespace"`
-		} `yaml:"metadata"`
-		Data map[string]string `yaml:"data"`
-	}{APIVersion: "v1", Kind: "ConfigMap", Data: map[string]string{"cds-url": doc.CDSURL(), "cds.json": string(cds)}}
-	manifest.Metadata.Name = "c8s-node-runtime"
-	manifest.Metadata.Namespace = "c8s-system"
-	out, err := yaml.Marshal(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("encode node runtime ConfigMap: %w", err)
-	}
-	return out, nil
 }
 
 // chooseHostInterface is a package var so tests can fake the host's routes.

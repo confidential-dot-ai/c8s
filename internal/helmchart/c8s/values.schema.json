@@ -3,6 +3,13 @@
   "$comment": "The root key set is closed, and the four subtrees operators hand-write are sealed, so an unknown or misspelled key is a render-time error instead of a silently dropped value. Every key of those subtrees in values.yaml must appear here. Leaf types stay unconstrained except where a wrong value is otherwise accepted silently (see the enums and ranges below). Maps whose keys belong to the consumer (label maps, digest maps, resources) are left open.",
   "type": "object",
   "properties": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baked": { "type": "boolean" }
+      }
+    },
     "cds": {
       "type": [
         "object",

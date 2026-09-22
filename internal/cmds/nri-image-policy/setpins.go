@@ -47,7 +47,7 @@ func runSetCDSPins(stdout io.Writer, args []string) error {
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPinsString(*rawRTMRs)
+	rtmrs, err := refvalues.ParseRegisterPinsString(*rawRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}

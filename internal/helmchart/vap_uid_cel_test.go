@@ -66,6 +66,21 @@ func evalAdmissionPolicy(t *testing.T, expr string, object, oldObject map[string
 	if err != nil {
 		t.Fatalf("cel env: %v", err)
 	}
+	var prior any
+	if oldObject != nil {
+		prior = oldObject
+	}
+	return evalCEL(t, env, expr, map[string]any{
+		"object":    object,
+		"oldObject": prior,
+		"request":   map[string]any{"operation": operation},
+	}) == true
+}
+
+// evalCEL compiles expr in env and evaluates it against activation, failing
+// the test on a compile or evaluation error.
+func evalCEL(t *testing.T, env *cel.Env, expr string, activation map[string]any) any {
+	t.Helper()
 	ast, iss := env.Compile(expr)
 	if iss != nil && iss.Err() != nil {
 		t.Fatalf("cel compile %q: %v", expr, iss.Err())
@@ -74,19 +89,11 @@ func evalAdmissionPolicy(t *testing.T, expr string, object, oldObject map[string
 	if err != nil {
 		t.Fatalf("cel program: %v", err)
 	}
-	var prior any
-	if oldObject != nil {
-		prior = oldObject
-	}
-	out, _, err := prg.Eval(map[string]any{
-		"object":    object,
-		"oldObject": prior,
-		"request":   map[string]any{"operation": operation},
-	})
+	out, _, err := prg.Eval(activation)
 	if err != nil {
 		t.Fatalf("cel eval %q: %v", expr, err)
 	}
-	return out.Value() == true
+	return out.Value()
 }
 
 // allTrue asserts every validation of a policy allows the object.

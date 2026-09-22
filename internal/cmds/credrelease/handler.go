@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
@@ -23,13 +25,56 @@ const maxBodyBytes = 1 << 16 // 64 KiB
 // exact shapes; the server package owns the protocol.
 const ReleasePath = "/release-credential"
 
+// Roles the operator may request. The operator key authorizes every release,
+// so the role is a choice of how much of the operator's own authority the
+// issued cert carries, not a second gate: RoleOperator manages tenant
+// workloads cluster-wide (the node image binds it to a bounded role that
+// cannot reach the baked guards, never cluster-admin), RoleLogReader reads
+// pods and their logs and nothing else. Each maps to a
+// distinct cert Subject (group + user) the cluster's RBAC binds.
+const (
+	RoleOperator  = "operator"
+	RoleLogReader = "log-reader"
+)
+
+// roleNames is the closed set of requestable roles, in help-text order.
+var roleNames = []string{RoleOperator, RoleLogReader}
+
+// ParseRole resolves a wire role name to its canonical form: "" is
+// RoleOperator (the pre-role wire format); anything outside the closed set is
+// an error, never a fallback to the operator identity. The CLI and the
+// handler share it so a typo fails the same way on both ends.
+func ParseRole(name string) (string, error) {
+	if name == "" {
+		return RoleOperator, nil
+	}
+	if !slices.Contains(roleNames, name) {
+		return "", fmt.Errorf("unknown role %q (want %s)", name, strings.Join(roleNames, " or "))
+	}
+	return name, nil
+}
+
 // ReleaseRequest is the POST ReleasePath body: a PEM CERTIFICATE REQUEST the
-// operator generated locally. The operator authorizes the request with an
-// operatorauth Bearer token whose pbh binds this exact body, so the CSR
-// cannot be swapped in transit.
+// operator generated locally plus the role the cert should carry (empty means
+// RoleOperator, the pre-role wire format). The operator authorizes the request
+// with an operatorauth Bearer token whose pbh binds this exact body, so
+// neither the CSR nor the role can be swapped in transit.
 type ReleaseRequest struct {
 	CSRPEM string `json:"csr"`
+	Role   string `json:"role,omitempty"`
 }
+
+// Identity is the Subject and lifetime cred-release stamps on a cert for one
+// role. Org becomes the Kubernetes group, CN the user.
+type Identity struct {
+	Org string
+	CN  string
+	TTL time.Duration
+}
+
+// Roles maps each requestable role (RoleOperator, RoleLogReader) to its
+// Identity. NewHandler requires every role to be present and complete.
+type Roles map[string]Identity
 
 // ReleaseResponse returns the signed client cert and the cluster CA so the
 // operator can assemble a kubeconfig. The apiserver address is known to the
@@ -57,17 +102,20 @@ type Handler struct {
 	attester evidenceGenerator
 	verifier operatorauth.Verifier
 	ca       *clusterCA
-	certTTL  time.Duration
-	certOrg  string // Kubernetes group (O) for the issued cert
-	certCN   string // Kubernetes user (CN)
+	roles    Roles
 	clock    clock
 }
 
-// NewHandler builds the release handler from the measured operator pubkey (PEM)
-// and the loaded cluster CA. The pubkey MUST already have been verified against
-// the launch binding by LoadMeasuredOperatorKey — NewHandler trusts it as
-// authorized.
-func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.Duration) (*Handler, error) {
+// NewHandler builds the release handler from the measured operator pubkey (PEM),
+// the loaded cluster CA and the per-role identities. The pubkey MUST already
+// have been verified against the launch binding by LoadMeasuredOperatorKey —
+// NewHandler trusts it as authorized.
+func NewHandler(operatorPubPEM []byte, ca *clusterCA, roles Roles) (*Handler, error) {
+	for _, name := range roleNames {
+		if id := roles[name]; id.Org == "" || id.CN == "" || id.TTL <= 0 {
+			return nil, fmt.Errorf("role %s: org, cn and a positive ttl are required", name)
+		}
+	}
 	keys, err := operatorauth.ParsePublicKeysPEM(operatorPubPEM)
 	if err != nil {
 		return nil, fmt.Errorf("operator pubkey (must be ECDSA PKIX PEM): %w", err)
@@ -80,9 +128,7 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 		// window meaningfully.
 		verifier: operatorauth.Verifier{Keys: keys, ClockSkew: 60 * time.Second},
 		ca:       ca,
-		certTTL:  ttl,
-		certOrg:  org,
-		certCN:   cn,
+		roles:    roles,
 		clock:    wallClock{},
 	}, nil
 }
@@ -126,6 +172,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	role, err := ParseRole(req.Role)
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := h.roles[role]
 	csr, err := parseCSR([]byte(req.CSRPEM))
 	if err != nil {
 		http.Error(w, "bad CSR: "+err.Error(), http.StatusBadRequest)
@@ -134,9 +186,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	certPEM, err := h.ca.signOperatorCert(signParams{
 		csr: csr,
-		org: h.certOrg,
-		cn:  h.certCN,
-		ttl: h.certTTL,
+		org: id.Org,
+		cn:  id.CN,
+		ttl: id.TTL,
 	}, h.clock.Now())
 	if err != nil {
 		http.Error(w, "sign: "+err.Error(), http.StatusInternalServerError)

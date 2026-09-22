@@ -1,48 +1,15 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# CONSUMER: c8s — the flagship payload ("install c8s + prove a cw workload runs")
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# This file owns only WHAT to test (the c8s payload) and WHEN (the trigger).
-# WHERE (boot/attest/teardown a CVM per platform) belongs to the primitive:
-#   .github/workflows/cvm-e2e.yml
-#
-# Adding a platform = adding a matrix row. Adding a DIFFERENT repo's test = a new
-# consumer file with a different payload on the SAME primitive (e.g.
-# attestation-rs: payload = `cargo test --features attest`, flavor: base-cpu).
-#
-# WHY NO OCI PULLS BY <sha> TAG: BOTH c8s publish workflows are PATH-GATED, so
-# a given main commit may have neither artifact under its own sha:
-#  - chart.yml (internal/helmchart/**): a Go-only merge publishes NO chart tag
-#    0.1.0-g<sha> -> helm pull 404s, c8s-system stays empty (failure mode 1).
-#  - docker.yml (source paths): a commit touching neither runs NO Docker at all,
-#    so retag-unchanged never fires and NO :<sha> image tags exist -> pods sit
-#    in ImagePullBackOff (failure mode 2; both observed live on main 70aea72).
-# Resolution, per artifact kind:
-#  - chart: packaged FROM SOURCE at the exact sha (anonymous codeload tarball),
-#    inlined via the HelmChart CR's chartContent.
-#  - images: can't be built from source here — resolve each component to the
-#    NEWEST existing sha tag at-or-before the commit under test (= what that
-#    commit would actually deploy). Under the post-merge trigger this is the
-#    head sha itself, because workflow_run chains off a completed Docker run.
-# No registry credential anywhere in this payload — the whole chain is public.
+# Product checks boot published measured node images on each hardware platform.
+# TDX stages the image published for the selected source commit. SNP requires
+# matching staged producer metadata. Services remain baked into each image.
 name: e2e-c8s
 on:
-  # Reusable: c8s's confidential-e2e.yml wrapper owns triggering (workflow_run
-  # off Docker + dispatch). Vendored from confidential-ci for Phase 0 — a public
-  # repo (c8s) cannot `uses:` a private repo's (confidential-ci) reusable
-  # workflow, so the lane lives here and is called locally (`uses: ./`).
   workflow_call:
     inputs:
       c8s_ref:
-        description: c8s commit to test
+        description: 'Source ref paired with the node image; empty uses the TDX checkout or staged SNP image ref'
         type: string
         required: false
-        default: main
-      aa_ref:
-        description: attestation-api image ref (tag or sha-<short>). Caller pins to a known-good build to avoid floating :main drift; default main keeps prior behaviour.
-        type: string
-        required: false
-        default: main
+        default: ''
 
 concurrency:
   group: e2e-c8s-${{ github.ref }}
@@ -58,8 +25,7 @@ jobs:
   # scratch-disk wiring and AppArmor checks guarded by node-guest-image-lint.
   # Preserve the separate staged and automatic-only exact-image wrappers
   # when re-vendoring that shared lifecycle. snp-metal-e2e.yml is
-  # c8s-owned (the c8s payload lives in this
-  # copy); edit it here.
+  # c8s-owned; both metal lanes require signed launch configuration.
   #
   # NOT a `matrix:`. A reusable-workflow `uses:` takes no expressions, so a
   # matrix would need an if-gated dispatcher, and because every row instantiates
@@ -79,29 +45,20 @@ jobs:
   snp-metal:
     permissions:
       contents: read
-      # The CVM reaper asks GitHub whether the owning run finished; without this
-      # it 403s silently and falls back to reaping on age alone.
       actions: read
     uses: ./.github/workflows/snp-metal-e2e.yml
     with:
       c8s_ref: ${{ inputs.c8s_ref }}
 
   tdx-metal:
-    # Staged-stack regression only. Exact-image AppArmor acceptance is called
+    # Test the requested commit with its published image. Automatic AppArmor acceptance is called
     # by c8s-image-publish.yml after publishing digest/measurement evidence.
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/tdx-metal-e2e.yml
     with:
-      # The same commit the SNP leg tests, installed on the node image built
-      # from it. Only that pair works: the node image's measured base
-      # allowlist (confidential-os-builder mkosi/base/mkosi.profiles/c8s/
-      # image-policy.yaml.in) pins ONE cds digest, its own build's, and CDS is
-      # what admits everything else, so a chart from any other commit has its
-      # CDS denied at container create and nothing converges. An empty ref
-      # would resolve to this run's checkout, main's head when the run
-      # started, which in a merge burst is a later commit than the one whose
-      # publish triggered us. This is the only lane in either repo that runs
-      # nri-image-policy fail-closed on TDX and asserts a real admission denial.
+      # Both legs test the source selected by the caller. Automatic runs use
+      # the published image's recorded source, so a later main head cannot
+      # select different CLI/tests or an unpaired measured image.
       c8s_ref: ${{ inputs.c8s_ref }}

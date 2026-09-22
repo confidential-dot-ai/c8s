@@ -2,6 +2,11 @@
 {{- $sans := include "router.sanList" . | fromJsonArray -}}
 {{- range $s := $sans -}}{{- include "router.validateSan" $s -}}{{- end -}}
 {{- $serverNames := join " " $sans -}}
+{{- if .Values.node.baked -}}
+{{- /* The sole virtual host accepts the launch-signed SAN. Certificate
+       issuance reads that SAN from the verified host file at runtime. */ -}}
+{{- $serverNames = "_" -}}
+{{- end -}}
 {{- $publicTLSMode := include "router.publicTLSMode" . -}}
 {{- include "router.validateProtocol" (required "protocol must be http or https" .Values.router.upstream.protocol) -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.router.tlsMountPath -}}
@@ -59,6 +64,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "router.fullname" . }}-nginx
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "router.labels" . | nindent 4 }}
 data:

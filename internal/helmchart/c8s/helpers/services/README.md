@@ -3,25 +3,37 @@
 Source: [templates/_services.tpl](../../templates/_services.tpl).
 [All helpers](../README.md).
 
-`c8s.attestationApiURL` selects the endpoint available to its consumer:
+`c8s.attestationApiSocketPresent` is the one predicate for "a node-local
+attestation socket exists": non-empty when `attestationApi.enabled` or
+`node.baked` is set. The helpers below branch on it.
 
-| Values | Endpoint |
-| --- | --- |
-| `attestationApi.enabled=true` | Node-local `unix://<runtimeDir>/attestation-api.sock` |
-| `attestationApi.enabled=false` (bare-metal mode only) | Node-baked service, `http://$(HOST_IP):<port>` |
+`c8s.attestationApiURL` selects the node-local
+`unix://<runtimeDir>/attestation-api.sock` endpoint when
+`attestationApi.enabled=true` or `node.baked=true`.
 
 The chart-managed attestation API binds pod loopback. Its attest-proxy exposes
 the node-local socket in `nriImagePolicy.hostPaths.runtimeDir`.
-When `attestationApi.enabled=true`, the socket volume/mount helpers expose the directory at its host path with a read-only mount and
-`DirectoryOrCreate` hostPath. The webhook rebases the socket path for injected
+The socket helpers expose its host directory read-only. Baked nodes require a
+pre-existing `Directory`; ordinary chart installs use `DirectoryOrCreate`.
+The webhook rebases the socket path for injected
 get-cert sidecars, and nri-image-policy NRI-mounts the directory read-only into
 those sidecars.
 
-In bare-metal CVM mode with the chart API disabled, `c8s.attestationApiHostIPEnv`
-renders the downward-API `HOST_IP` variable. Kubelet expands the placeholder
-against each consumer's node. The operator forwards the URL to tenant sidecars
-with the placeholder intact, so its own container must leave `HOST_IP` unset.
 `c8s.attestationApiConfig` takes a dict with `root` and renders the API's TOML.
+
+With `node.baked=true`, the attester and proxy run as systemd services; CDS,
+router, mesh and operator use the same Kubernetes templates as ordinary installs.
+CDS and router are singleton workloads on the signed server's control-plane node.
+Pod clients use the CDS Service URL; the host NRI client uses its signed endpoint.
+
+`c8s.nodeConfigVolume` and `c8s.nodeConfigMount` expose only the nonsecret verified
+launch files in `/run/c8s-node`, read-only. CDS and mesh verify peers with
+`peers.json`; every CDS client uses the separate server-only `cds.json` policy.
+CDS also consumes the merged seed and operator public key. Router certificate
+issuance and CDS SAN authorization read `tls-san`; nginx uses its sole default
+virtual host. The token-bearing launch directory is never mounted into pods.
+Missing policy files fail startup. Workload sidecars retain NRI socket injection.
+Cluster administrators remain trusted to manage the rendered Kubernetes objects.
 
 `c8s.cdsURL` builds the in-cluster CDS Service URL; `c8s.trustRootURL` delegates
 to it. `c8s.nriCDSURL` uses `nriImagePolicy.cds.url` when supplied, otherwise

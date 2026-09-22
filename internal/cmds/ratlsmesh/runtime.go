@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -34,7 +35,9 @@ type meshRuntime struct {
 }
 
 func newMeshRuntime(cfg *ratls.ServerConfig, logger *slog.Logger, sessionCacheSize int) (*meshRuntime, error) {
-	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(cfg)
+	serverConfig := *cfg
+	serverConfig.Logger = logger.With("cert_role", "server")
+	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(&serverConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create server TLS config: %w", err)
 	}
@@ -46,7 +49,7 @@ func newMeshRuntime(cfg *ratls.ServerConfig, logger *slog.Logger, sessionCacheSi
 		DynamicCACert:   cfg.DynamicCACert,
 		CertTTL:         cfg.CertTTL,
 		RotationTimeout: cfg.RotationTimeout,
-		Logger:          cfg.Logger,
+		Logger:          logger.With("cert_role", "client"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create client TLS config: %w", err)
@@ -72,9 +75,13 @@ func newMeshRuntime(cfg *ratls.ServerConfig, logger *slog.Logger, sessionCacheSi
 	}
 	serverTLS.VerifyPeerCertificate = wrapVerify(serverTLS.VerifyPeerCertificate)
 	clientTLS.VerifyPeerCertificate = wrapVerify(clientTLS.VerifyPeerCertificate)
-	serverCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
+	serverCertMgr.SetOnRotationFail(func() {
+		m.certRotationFailures.WithLabelValues("server").Inc()
+	})
 	if clientCertMgr != nil {
-		clientCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
+		clientCertMgr.SetOnRotationFail(func() {
+			m.certRotationFailures.WithLabelValues("client").Inc()
+		})
 	}
 	return &meshRuntime{
 		logger: logger, serverTLS: serverTLS, clientTLS: clientTLS,
@@ -84,13 +91,31 @@ func newMeshRuntime(cfg *ratls.ServerConfig, logger *slog.Logger, sessionCacheSi
 }
 
 func (r *meshRuntime) run(ctx context.Context, env meshEnvironment) error {
+	ctx, cancel := context.WithCancel(ctx)
+	var rotations sync.WaitGroup
+	defer func() {
+		cancel()
+		rotations.Wait()
+		if r.health != nil {
+			r.health.ready.Store(false)
+		}
+	}()
 	p := env.configure(r)
 	r.proxy = p
 	p.serverTLS, p.clientTLS = r.serverTLS, r.clientTLS
 	p.logger, p.metrics = r.logger, r.metrics
 	p.origDstFunc = defaultOrigDstFunc
 	p.bufPool = newBufPool(p.pipeBufferSize)
+	listenersReady := make(chan struct{})
 	p.onReady = func() {
+		close(listenersReady)
+	}
+	rotations.Go(func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-listenersReady:
+		}
 		warmupCtx, cancel := context.WithTimeout(ctx, 2*r.rotationTimeout)
 		defer cancel()
 		if err := r.serverCertMgr.WarmUp(warmupCtx); err != nil {
@@ -101,9 +126,19 @@ func (r *meshRuntime) run(ctx context.Context, env meshEnvironment) error {
 				r.logger.Error("client certificate warm-up failed", "error", err)
 			}
 		}
-		r.health.ready.Store(true)
+		rotations.Go(func() {
+			r.serverCertMgr.RunRotation(ctx)
+		})
+		if r.clientCertMgr != nil {
+			rotations.Go(func() {
+				r.clientCertMgr.RunRotation(ctx)
+			})
+		}
+		r.health.ready.Store(ctx.Err() == nil)
+	})
+	p.onShutdown = func() {
+		r.health.ready.Store(false)
 	}
-	p.onShutdown = func() { r.health.ready.Store(false) }
 	go func() {
 		if err := r.health.serve(ctx, fmt.Sprintf(":%d", r.healthPort), r.healthListener); err != nil {
 			r.logger.Error("health server error", "error", err)

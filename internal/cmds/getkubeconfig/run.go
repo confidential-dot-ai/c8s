@@ -37,6 +37,10 @@ type Config struct {
 	// expected to have extended into RTMR[3], in first-extend order. Empty
 	// means the register must equal the bare operator-key seed.
 	WorkloadImages []string
+	// Role selects the identity cred-release stamps on the cert:
+	// credrelease.RoleOperator (the bounded operator role; "" means the same) or
+	// credrelease.RoleLogReader (pods and their logs only).
+	Role string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -63,6 +67,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("--release-url must be an absolute HTTPS URL without userinfo, query or fragment")
 	}
 	cfg.ReleaseBaseURL = strings.TrimRight(cfg.ReleaseBaseURL, "/")
+	role, err := credrelease.ParseRole(cfg.Role)
+	if err != nil {
+		return err
+	}
 	keyPEM, err := os.ReadFile(cfg.OperatorKeyPath)
 	if err != nil {
 		return fmt.Errorf("read operator key: %w", err)
@@ -112,7 +120,7 @@ func Run(ctx context.Context, cfg Config) error {
 	var resp *credrelease.ReleaseResponse
 	err = httputil.RetryConnectionRefused(ctx, cfg.Timeout, cfg.ReleaseWait, func(stepCtx context.Context) error {
 		var requestErr error
-		resp, requestErr = requestCredential(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
+		resp, requestErr = requestCredential(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM, role)
 		return requestErr
 	})
 	if err != nil {
@@ -124,7 +132,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
+	fmt.Fprintf(os.Stderr, "wrote %s (context %q, role %s) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName, role)
 	return nil
 }
 

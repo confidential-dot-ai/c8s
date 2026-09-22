@@ -43,12 +43,12 @@ run_test_case() {
     # derive these from state.d, which would hide missing build-time dirs.
     for directory in var home root tmp run etc \
         etc/rancher/rke2/config.yaml.d etc/cni/net.d opt/cni/bin \
-        etc/nri/conf.d opt/nri/plugins; do
+        etc/nri/conf.d opt/nri/plugins usr/lib/c8s; do
         mkdir -p "/image/$directory"
     done
     chmod 0700 /image/root
     chmod 1777 /image/tmp
-    cp /nri-floor-template /image/etc/nri/conf.d/image-policy.yaml
+    cp /nri-floor-template /image/usr/lib/c8s/image-policy.yaml
     printf 'baked plugin fixture\n' > /image/opt/nri/plugins/10-nri-image-policy
     # Finalize after composing every profile, including /etc/confai's symlink.
     run_checked env BUILDROOT=/image /bin/bash /finalize-under-test
@@ -68,7 +68,9 @@ run_test_case() {
         : > /expected
         cmp /expected /proc/sysrq-trigger || fail "successful init changed sysrq trigger"
         printf 'runtime state\n' > /expected
-        # Exercise atomic replacement, including the chart's baked NRI floor.
+        # Launch preparation derives the runtime floor from the immutable template.
+        cp /sysroot/usr/lib/c8s/image-policy.yaml /sysroot/etc/nri/conf.d/image-policy.yaml
+        # Exercise atomic replacement of the staged floor and node state.
         for path in \
             etc/rancher/rke2/config.yaml.d/95-gpu-resources.yaml \
             etc/rancher/node/password etc/cni/net.d/10-cilium.conflist \
@@ -81,7 +83,8 @@ run_test_case() {
             cmp /expected "$path" || fail "runtime write: $path"
         done
         for path in usr/local/bin/immutable-root-test \
-            opt/nri/plugins/10-nri-image-policy etc/hostname etc/undeclared; do
+            opt/nri/plugins/10-nri-image-policy usr/lib/c8s/image-policy.yaml \
+            etc/hostname etc/undeclared; do
             if { printf 'must not modify the image\n' > "/sysroot/$path"; } 2>/write-error; then
                 fail "undeclared path is writable: $path"
             fi

@@ -1,3 +1,9 @@
+## Render Kubernetes core services into the measured node image at build time.
+## Signed launch policies are staged on each node at /run/c8s-node; the host
+## owns attestation, RKE2 and NRI. Ordinary Helm installs leave this off.
+node:
+  baked: false
+
 ## The c8s component image set: the single source the chart and `c8s install`
 ## both enumerate from, so adding a component is one edit here.
 ##   - valuePath:   dotted path to the component's image object (repository/

@@ -11,6 +11,44 @@ set -euo pipefail
 
 ns=c8s-system
 
+if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
+  : "${C8S_MEASUREMENTS_CONFIG:?node-image checks require the full server policy}"
+  : "${C8S_ALLOWLIST_URL:?node-image checks require the measured CDS front door}"
+  workloads=(deployment/c8s-operator deployment/c8s-cds deployment/c8s-router daemonset/c8s-ratls-mesh)
+  # The authenticated credential listener can become available before RKE2
+  # has applied the complete AddOn. Require every core workload to exist.
+  kubectl -n "$ns" wait --for=create "${workloads[@]}" --timeout=8m
+  for workload in "${workloads[@]}"; do
+    kubectl -n "$ns" rollout status "$workload" --timeout=8m
+  done
+  # Public policies are host-staged, not stored in Kubernetes. Check that
+  # every consumer uses its required read-only file. The external RA-TLS
+  # request below verifies the actual endpoint against the signed policy.
+  kubectl -n "$ns" get "${workloads[@]}" -o json | jq -e '
+    def policy($workload; $container; $flag):
+      any(.items[];
+        .metadata.name == $workload and
+        (.spec.template.spec |
+          any(.volumes[]?;
+            .name == "node-config" and .hostPath.path == "/run/c8s-node" and
+            .hostPath.type == "Directory") and
+          any((.containers + (.initContainers // []))[];
+            .name == $container and ((.args // []) | index($flag)) != null and
+            any(.volumeMounts[]?;
+              .name == "node-config" and .mountPath == "/run/c8s-node" and .readOnly == true))));
+    policy("c8s-operator"; "operator"; "--image-policy-file=/run/c8s-node/cds.json") and
+    policy("c8s-cds"; "cds"; "--image-policy-file=/run/c8s-node/peers.json") and
+    policy("c8s-router"; "c8s-cert"; "--image-policy-file=/run/c8s-node/cds.json") and
+    policy("c8s-router"; "allowlist-proxy"; "--image-policy-file=/run/c8s-node/cds.json") and
+    policy("c8s-ratls-mesh"; "ratls-mesh"; "--image-policy-file=/run/c8s-node/peers.json") and
+    policy("c8s-ratls-mesh"; "ratls-mesh"; "--cds-image-policy-file=/run/c8s-node/cds.json") and
+    all(.items[].spec.template.spec.volumes[]?;
+      ((.hostPath.path // "") | startswith("/run/confos")) | not)
+  ' >/dev/null || fail "baked workloads lost their required public identity policies or mount private launch data"
+  chart=$(kubectl -n kube-system get helmcharts.helm.cattle.io c8s --ignore-not-found -o name)
+  [ -z "$chart" ] || fail "node image unexpectedly started a runtime c8s Helm installation"
+fi
+
 select_pods() {
   if [ "$#" -eq 0 ]; then cat; return 0; fi
   local pat="" p
@@ -51,4 +89,15 @@ if [ -z "$converged" ]; then
   fail "c8s components did not converge (${n:-?} of ${total:-0} not ready)"
 fi
 
-echo "PASS: all $total c8s components Running"
+if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
+  ready=0
+  for _ in $(seq 1 60); do
+    if c8s allowlist list --url "$C8S_ALLOWLIST_URL" --image-policy-file "$C8S_MEASUREMENTS_CONFIG" >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 5
+  done
+  [ "$ready" = 1 ] || fail "measured CDS/front-door services did not become ready under the server policy"
+fi
+
+echo "PASS: all $total c8s Kubernetes components Running"

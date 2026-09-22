@@ -12,6 +12,11 @@ on:
   pull_request:
     paths:
       - "node-guest-image/**"
+      - "internal/cmds/launchconfig/**"
+      - "internal/cmds/nodeservices/**"
+      - "cmd/c8s/node_image*.go"
+      - "cmd/c8s/node_services*.go"
+      - "internal/helmchart/**"
       - "test/e2e/**"
       - ".github/workflows/node-guest-image-lint.yml"
       - ".github/build-pins.json"
@@ -22,6 +27,7 @@ on:
       # The lint guards this vendored file's c8s-local bait/tripwire markers;
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
+      - ".github/workflows/snp-metal-e2e.yml"
       - ".github/workflows/tdx-image-acceptance.yml"
       - ".github/actions/tdx-metal-e2e/**"
       # The invariants gate body; a script-only change must run the gate.
@@ -86,6 +92,9 @@ jobs:
         run: |
           .github/scripts/node-guest-image-invariants.sh
           bash .github/scripts/tests/test-node-guest-image-invariants.sh
+
+      - name: Preserve the selected attester configuration with a loopback bind
+        run: ./node-guest-image/tests/attester-finalize-test.sh
 
       - name: Resolve the confos base release
         id: release
@@ -295,12 +304,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install genisoimage
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends genisoimage
-
       - name: Run the script-level harness
-        # Root: loop mounts + /run/confos writes; the runner VM is disposable.
-        run: sudo make test-node-guest-image-role
+        # The production script runs unchanged in an unprivileged container.
+        run: make test-node-guest-image-role
 
   rke2-role-systemd:
     name: rke2-role dispatch (systemd)
@@ -310,3 +316,27 @@ jobs:
 
       - name: Run the systemd-level harness
         run: make test-node-guest-image-role-systemd
+
+  baked-workloads:
+    name: rendered workloads and measured image archives
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+
+      - name: Check the image archiver and offline fixture
+        run: shellcheck node-guest-image/c8s/airgap-images.sh node-guest-image/tests/airgap-images-test.sh
+
+      - name: Validate complete workloads and preserved image pins
+        run: |
+          go test -count=1 ./cmd/c8s -run TestNodeImage
+          make test-node-guest-image-airgap

@@ -1,51 +1,24 @@
-# Presets are processed by `systemctl preset-all` during the mkosi build.
-# Each `enable`/`disable` line creates the corresponding
-# /etc/systemd/system/... symlink at bake time so it's measured into the
-# verity root. The rke2 units live in /usr/local/lib/systemd/system (staged
-# there by this profile's mkosi.sync), which is on systemd's unit search
-# path.
-#
-# Both rke2-server AND rke2-agent are enabled: rke2-role.service decides
-# the role at runtime (joindata disk, strictly either/or) and each rke2
-# unit conditions on the matching /run/confos/role-* verdict; the other is
-# SKIPPED, not failed. No joindata disk => server (single-node default).
+# Presets are applied at image build time. Both RKE2 units are enabled;
+# the authenticated launch verdict selects exactly one at each boot.
 enable containerd-data-disk.service
-# Read-only weights disk (serial=confai-models). Enabled always; a no-op boot
-# when the disk isn't attached (GPU-less / no-weights launches).
 enable models-disk.service
-# Publish the node address the nri-image-policy admission inventory advertises
-# to CDS. Ordered before rke2 so the file exists when containerd launches the
-# baked plugin.
 enable nri-node-ip.service
-# Label GPU launches before rke2 registers the node; the baked
-# nvidia-device-plugin DaemonSet selects on the label.
 enable gpu-node-label.service
 # Fail closed on a non-CC or unattested GPU before nvidia-cc-ready sets the
 # CC Ready state; RequiredBy nvidia-cc-ready and the rke2 pair so a failed
 # gate never readies or schedules the GPU.
 enable gpu-cc-enforce.service
-# Fail closed when the initrd fell back to the tmpfs for writable state; RequiredBy
-# the rke2 pair so a scratch-less node powers off instead of flapping.
 enable scratch-enforce.service
-# Latch kernel.modules_disabled before rke2 starts. The gpu profile enables its
-# own latch; this one also covers the GPU-less composition, where that unit is
-# absent.
 enable c8s-modules-latch.service
-# Role dispatch + the role-gated rke2 pair.
 enable rke2-role.service
 enable rke2-server.service
 enable rke2-agent.service
-# NTP: sync the free-running TDX guest clock so it doesn't drift behind the
-# operator and trip cred-release's JWT clock-skew check. Egress is via the
-# CVM's masquerade NAT.
 enable systemd-timesyncd.service
 # Makes time-sync.target block until the clock is actually synchronised,
 # which gpu-cc-enforce now orders after (NRAS JWT nbf).
 enable systemd-time-wait-sync.service
-# Attested operator credential release. Enabled always, but its
-# ConditionPathExists on the opkeydata disk means it only starts on operator
-# boots — a no-op on nodes launched without --operator-key.
 enable cred-release.service
+enable attest-proxy.service
 # Check the running LSM and exercise a real policy before RKE2 can start.
 enable apparmor-enforce.service
 # The apparmor package supplies apparmor_parser and aa-exec for the boot

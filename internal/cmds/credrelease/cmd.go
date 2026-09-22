@@ -10,6 +10,11 @@ const (
 	defaultCertTTL = time.Hour
 	defaultCertOrg = "c8s:node-operators"
 	defaultCertCN  = "operator"
+	// The log-reader identity is handed on to people who cannot re-release
+	// it themselves (only the operator key can), so it lives longer.
+	defaultLogCertTTL = 24 * time.Hour
+	defaultLogCertOrg = "c8s:log-readers"
+	defaultLogCertCN  = "log-reader"
 )
 
 // NewCmd builds the `cred-release` subcommand: the in-guest service that
@@ -27,15 +32,18 @@ func NewCmd() *cobra.Command {
 			"operator key whose public half was bound into the launch identity\n" +
 			"(TDX: RTMR[3]; SNP: HOSTDATA) at launch.\n" +
 			"It gives an external operator console-free, non-TOFU, RBAC-backed\n" +
-			"cluster-admin access with no pre-shared secret and no trust in the\n" +
-			"host. The cert is signed by the cluster's client CA and the\n" +
+			"operator access with no pre-shared secret and no trust in the\n" +
+			"host. The same key may instead request a log-reader cert (role\n" +
+			"log-reader: pods and their logs, nothing else) to hand on to\n" +
+			"someone who should not hold the operator role.\n" +
+			"The cert is signed by the cluster's client CA and the\n" +
 			"kubeconfig anchors to the serving CA (RKE2 paths by default; any\n" +
 			"distribution works via --client-ca-cert/--client-ca-key/\n" +
 			"--server-ca-cert — on kubeadm all three are\n" +
 			"/etc/kubernetes/pki/ca.crt). Authorization is the cluster's RBAC on\n" +
-			"the issued group: the c8s node image bakes a ClusterRoleBinding for\n" +
-			"the default --cert-org; elsewhere create one or pass a group the\n" +
-			"cluster already binds, or every request is denied.",
+			"the issued group: the c8s node image bakes ClusterRoleBindings for\n" +
+			"the default --cert-org and --log-cert-org; elsewhere create them or\n" +
+			"pass groups the cluster already binds, or every request is denied.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return Run(cmd.Context(), cfg)
 		},
@@ -48,8 +56,11 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.DurationVar(&cfg.CertTTL, "cert-ttl", defaultCertTTL, "lifetime of issued operator certs")
-	f.StringVar(&cfg.CertOrg, "cert-org", defaultCertOrg, "Kubernetes group (cert Subject O) for the issued cert; the cluster's RBAC must bind it (the c8s node image binds the default to cluster-admin)")
+	f.StringVar(&cfg.CertOrg, "cert-org", defaultCertOrg, "Kubernetes group (cert Subject O) for the issued cert; the cluster's RBAC must bind it (the c8s node image binds the default to the baked, bounded c8s-node-operator ClusterRole)")
 	f.StringVar(&cfg.CertCN, "cert-cn", defaultCertCN, "Kubernetes user (cert Subject CN) for the issued cert")
+	f.DurationVar(&cfg.LogCertTTL, "log-cert-ttl", defaultLogCertTTL, "lifetime of issued log-reader certs")
+	f.StringVar(&cfg.LogCertOrg, "log-cert-org", defaultLogCertOrg, "Kubernetes group (cert Subject O) for log-reader certs; the cluster's RBAC must bind it (the c8s node image binds the default to the baked c8s-log-reader ClusterRole)")
+	f.StringVar(&cfg.LogCertCN, "log-cert-cn", defaultLogCertCN, "Kubernetes user (cert Subject CN) for log-reader certs")
 	// No default: the baked unit always passes the flag explicitly.
 	_ = cmd.MarkFlagRequired("platform")
 	return cmd

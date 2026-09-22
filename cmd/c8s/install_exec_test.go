@@ -112,6 +112,44 @@ func TestPreflightCDSNodeExec(t *testing.T) {
 	})
 }
 
+// notBakedKubectl returns a namespace response only for the expected read.
+func notBakedKubectl(out string) string {
+	return `case "$*" in
+"get namespace c8s-system -o json --ignore-not-found") printf '%s' '` + out + `' ;;
+*) exit 1 ;;
+esac`
+}
+
+func TestPreflightNotBakedNodeExec(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		wantErr      bool
+	}{
+		{"baked namespace", `{"metadata":{"labels":{"confidential.ai/baked":"true"}}}`, true},
+		{"ordinary namespace", `{"metadata":{"labels":{"confidential.ai/baked":"false"}}}`, false},
+		{"unlabelled namespace", `{"metadata":{}}`, false},
+		{"no namespace", "", false},
+		{"malformed response", "broken", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeBin(t)
+			f.tool(t, "kubectl", notBakedKubectl(tc.output))
+			err := preflightNotBakedNode(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("got %v, want error %v", err, tc.wantErr)
+			}
+			mustContainLine(t, f.calls(t), "kubectl get namespace c8s-system -o json --ignore-not-found")
+		})
+	}
+	t.Run("read failure remains visible", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo 'namespaces is forbidden' >&2; exit 1`)
+		if err := preflightNotBakedNode(context.Background()); err == nil || !strings.Contains(err.Error(), "namespaces is forbidden") {
+			t.Fatalf("want server error, got %v", err)
+		}
+	})
+}
+
 // podListFile writes a typed PodList as the JSON `kubectl get pods -A -o json`
 // would emit and returns its path.
 func podListFile(t *testing.T, pods ...corev1.Pod) string {

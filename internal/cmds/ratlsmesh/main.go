@@ -250,8 +250,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
 	}
-	if len(meshPolicy.Policy.RTMRs) > 0 {
-		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.RTMRs))
+	if len(meshPolicy.Policy.Registers) > 0 {
+		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.Registers))
 	} else if c.platform == "tdx" && len(meshPolicy.Policy.Measurements) > 0 {
 		logger.Warn("no --rtmrs set: TDX measurement pinning covers TDVF firmware only (MRTD); peer guest kernel and rootfs are not pinned")
 	}
@@ -291,7 +291,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
+	cdsRTMRs, err := refvalues.ParseRegisterPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
@@ -662,11 +662,11 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 // development only).
 func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
-	pins, err := refvalues.ParseRTMRPinsString(rtmrs)
+	pins, err := refvalues.ParseRegisterPinsString(rtmrs)
 	if err != nil {
 		return nil, fmt.Errorf("--rtmrs: %w", err)
 	}
-	policy.Policy.RTMRs = pins
+	policy.Policy.Registers = pins
 	if measurements == "" {
 		return policy, nil
 	}

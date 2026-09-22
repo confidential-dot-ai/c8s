@@ -43,13 +43,19 @@
 #   C8S_NAME=...       output name (default c8s → output/c8s/)
 #   C8S_MEMORY=...     default-memory recorded in the manifest / used by
 #                      `confos run` (default 16G — etcd OOMs at the 4G default)
-#   C8S_REF=...        bake the c8s components (nri plugin + the CDS digest in
-#                      the NRI floor) from a specific c8s COMMIT (short SHA)
+#   C8S_REF=...        bake the host binary and core container images
+#                      from a specific c8s COMMIT (short SHA)
 #                      instead of the pin in the c8s profile's mkosi.sync,
 #                      which resolves nri-image-policy:<ref> and cds:<ref> to
 #                      digests. The images must be published first (c8s
 #                      docker.yml on main, or workflow_dispatch for a branch).
 #                      Use to test an unmerged c8s build end-to-end.
+#   C8S_BINARY=...     pre-stage this locally built multi-command c8s binary
+#                      instead of pulling nri-image-policy:<C8S_REF>. The
+#                      core container images still resolve from C8S_REF and
+#                      must support the chart's commands. The image repro gate
+#                      builds the PR's host binary this way; published images
+#                      never set it.
 #   CONFOS_DIR=...     confos checkout to build with (default: sibling of this
 #                      repo's checkout).
 #   MODULE_SIG_KEY_PEM / MODULE_SIG_KEY
@@ -114,6 +120,10 @@ else
     echo "$GPU_FPR" > "$GPU_STAMP"
 fi
 bin/confos-fetch-attest-gpu
+if [ -n "${C8S_BINARY:-}" ]; then
+    [ -f "$C8S_BINARY" ] || { echo "node-guest-image/build: C8S_BINARY=$C8S_BINARY is not a file" >&2; exit 1; }
+    install -D -m 0755 "$C8S_BINARY" mkosi/base/mkosi.local/mkosi.extra/usr/local/bin/c8s
+fi
 exec bin/confos build "${C8S_NAME:-c8s}" \
     "${PROFILES[@]}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
@@ -122,6 +132,7 @@ exec bin/confos build "${C8S_NAME:-c8s}" \
     --sync-input "platform=${C8S_PLATFORM}" \
     --sync-input "c8s-ref=${C8S_REF:-}" \
     --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
+    --sync-input "c8s-binary=${C8S_BINARY:+1}" \
     --sync-input "dev=${C8S_DEV:-0}" \
     --kernel-config-fragment "$FRAGMENT" \
     --kernel-builder-package "$KB_PKGS" \

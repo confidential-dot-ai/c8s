@@ -58,15 +58,13 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI base allowlist is a template: its permissive workloads
-# carry @-token digests the sync fills with ref-resolved values; a hardcoded
-# sha256 would bake a stale digest the fail-closed plugin can't reconcile
-# with the ref. The marked block is exempt: systemfloor generates it from
-# the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI template contains only the generated RKE2 system floor.
+# The complete chart component seed is merged into it before containerd starts;
+# duplicating component digests here would drift from the rendered workloads.
 policy="$ngi/c8s/image-policy.yaml.in"
 [ -f "$policy" ] || { echo "::error::NRI base template $policy not found"; exit 1; }
 if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
-  echo "::error::$policy has a hardcoded base digest outside the generated system base; use the @CDS_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
+  echo "::error::$policy has a hardcoded base digest outside the generated system base; derive core component pins from the build-time chart seed"
   exit 1
 fi
 
@@ -87,15 +85,52 @@ if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   exit 1
 fi
 
-# The locked image must keep the kubelet debugging handlers off (no kubectl
-# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
-# turn them back on, and only through the sync-rendered drop-in.
-if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
-  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+# The kubelet debugging handlers stay on (they back kubectl logs, which the
+# log-reader credential exists for); exec/attach/port-forward/ephemeral
+# containers are closed at the apiserver by the baked pod-exec-policy AddOn
+# (its shape and expression are tested in internal/helmchart). Only the
+# C8S_DEV=1 build may skip that AddOn, and only through the sync-rendered
+# .skip marker.
+manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+sync="$ngi/c8s/mkosi.sync"
+if ! grep -qxF '  - enable-debugging-handlers=true' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=true (kubectl logs)"
   exit 1
 fi
-if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
-  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+# cred-release identities are bounded: the operator binding must not name
+# cluster-admin (the baked guards must hold against the credential holder).
+if grep -q 'name: cluster-admin' "$manifests/cred-release-rbac.yaml"; then
+  echo "::error::$manifests/cred-release-rbac.yaml binds the operator to cluster-admin; the baked guards must hold against the credential holder"
+  exit 1
+fi
+# Every guard AddOn — each baked admission policy and each binding of a
+# cred-release group — must be staged by mkosi.sync as a reference copy on
+# the read-only root, where psa-ready.sh waits for it and compares the live
+# objects against it. mkosi.sync's GUARDS list is the single statement of
+# what is a guard; check it against the manifests rather than repeating it.
+guards=$(sed -n 's/^GUARDS="\(.*\)"$/\1/p' "$sync")
+if [ -z "$guards" ] || ! grep -q 'usr/lib/confai/guards' "$sync"; then
+  echo "::error::$sync must list the guard AddOns in GUARDS= and stage them under /usr/lib/confai/guards"
+  exit 1
+fi
+for guard in $guards; do
+  if [ ! -f "$manifests/$guard.yaml" ]; then
+    echo "::error::$sync stages $guard.yaml as a guard but $manifests/$guard.yaml is missing"
+    exit 1
+  fi
+done
+for file in $(grep -lE 'kind: ValidatingAdmissionPolicy$|name: c8s:' "$manifests"/*.yaml); do
+  guard=$(basename "$file" .yaml)
+  case " $guards " in
+    *" $guard "*) ;;
+    *)
+      echo "::error::$file is a guard (an admission policy or a cred-release group binding) but $sync GUARDS= does not stage it"
+      exit 1
+      ;;
+  esac
+done
+if find "$ngi/c8s/mkosi.extra" -name '*.skip' | grep -q .; then
+  echo "::error::a baked .skip marker disables an RKE2 AddOn; only mkosi.sync may render one, for dev=1"
   exit 1
 fi
 if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
@@ -170,6 +205,7 @@ fi
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
 tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
+              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json' \
               'bash node-guest-image/tests/apparmor-runtime-test.sh' \
               'import the exact published image into a private root PVC' \
               'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
@@ -285,7 +321,7 @@ fi
 # pods, and the baked policy that stops tenants relabelling their namespaces
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
-vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+vap="$manifests/psa-level-policy.yaml"
 psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
@@ -323,11 +359,14 @@ if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
   exit 1
 fi
 for required in \
-  'get validatingadmissionpolicy "$policy"' \
-  'get validatingadmissionpolicybinding "$policy"' \
+  'GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}' \
+  'replace --dry-run=server -f "$file"' \
+  'get -f "$file"' \
   '--as="$probe_user" create --dry-run=server' \
   'probe_namespace restricted' \
-  'probe_namespace privileged'; do
+  'probe_namespace privileged' \
+  'probe_scope default' \
+  'probe_scope kube-system'; do
   if ! grep -qF -- "$required" "$psa_gate"; then
     echo "::error::$psa_gate is missing required live admission probe: $required"
     exit 1
@@ -344,5 +383,104 @@ grep -qE '^\s*apparmor\s*$' "$ngi/c8s/mkosi.conf" \
   || { echo "::error::$ngi/c8s/mkosi.conf must ship the apparmor package (apparmor_parser)"; exit 1; }
 grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset" \
   || { echo "::error::50-rke2.preset must disable apparmor.service (only the parser is wanted)"; exit 1; }
+
+# The image renders Kubernetes integration from its staged binary at BUILD
+# time. It must not revive a c8s HelmChart or boot-time values merge.
+for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
+             '--kube-version "${RKE2_VERSION%%+*}"' \
+             'c8s-integration.yaml' '/usr/lib/c8s/allowlist-seed.json' \
+             '--cds-image-digest "$CDS_DIGEST"' '--ratls-mesh-image-digest "$MESH_DIGEST"' \
+             'c8s/airgap-images.sh' '"$out/images.txt"'; do
+  if ! grep -qF -- "$token" "$sync"; then
+    echo "::error::$sync must stage the measured node integration (missing: $token)"
+    exit 1
+  fi
+done
+for stale in "$ngi/c8s/c8s-chart.tdx.yaml.in" "$ngi/c8s/c8s-chart.snp.yaml.in" \
+             "$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-chart-values.service" \
+             "$ngi/c8s/mkosi.extra/usr/local/bin/c8s-chart-values.sh" \
+             "$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/c8s-chart.yaml"; do
+  if [ -e "$stale" ]; then
+    echo "::error::obsolete c8s Helm bootstrap artifact remains: $stale"
+    exit 1
+  fi
+done
+if grep -qE 'render_chart_helmchart|helm-install-c8s' "$sync" "$preset"; then
+  echo "::error::node bootstrap must not install the c8s chart at runtime"
+  exit 1
+fi
+
+# A verified role is required for both RKE2 roles and every core service.
+# Conditions alone merely skip units; Requires= plus After= propagate a
+# verifier/preparation failure before evaluating the role condition.
+units="$ngi/c8s/mkosi.extra/etc/systemd/system"
+role="$units/rke2-role.service"
+role_sh="$ngi/c8s/mkosi.extra/usr/local/bin/rke2-role.sh"
+require_launch_dependency() {
+  local unit=$1
+  if ! grep -qE '^Requires=.*rke2-role[.]service' "$unit" \
+     || ! grep -qE '^After=.*rke2-role[.]service' "$unit"; then
+    echo "::error::$unit must require and start after authenticated launch staging"
+    exit 1
+  fi
+}
+for rke2_role in server agent; do
+  dropin="$units/rke2-$rke2_role.service.d/20-role.conf"
+  require_launch_dependency "$dropin"
+  if ! grep -qxF "ConditionPathExists=/run/confos/role-$rke2_role" "$dropin"; then
+    echo "::error::$dropin must gate on the authenticated $rke2_role verdict"
+    exit 1
+  fi
+done
+if ! grep -qE '^Requires=.*attestation-api[.]service' "$role" \
+   || ! grep -qE '^After=.*attestation-api[.]service' "$role"; then
+  echo "::error::$role must require the local attester before launch verification"
+  exit 1
+fi
+for token in 'blkid -L opkeydata' 'c8s launch-config stage' 'launch.yaml"' 'launch.yaml.sig"' 'c8s node-services prepare'; do
+  if ! grep -qF -- "$token" "$role_sh"; then
+    echo "::error::$role_sh lost mandatory authenticated launch staging ($token)"
+    exit 1
+  fi
+done
+if ! grep -qE '^timeout 10 mount -t iso9660 -o ro,nodev,nosuid,noexec ' "$role_sh"; then
+  echo "::error::$role_sh must bound the read-only opkeydata ISO mount with timeout 10"
+  exit 1
+fi
+if grep -qE 'joindata|defaulting to server|set_legacy_server_role' "$role_sh"; then
+  echo "::error::$role_sh must not select a role from unsigned data or a missing disk"
+  exit 1
+fi
+
+# Only attestation access, node inventory and credential release remain host
+# services. Core application lifecycle belongs to the baked Kubernetes chart.
+for service in attest-proxy nri-node-ip cred-release; do
+  require_launch_dependency "$units/$service.service"
+  if ! grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$preset must enable $service.service"
+    exit 1
+  fi
+done
+for service in cds ratls-mesh ratls-mesh-iptables c8s-get-cert cds-attest allowlist-proxy c8s-nginx; do
+  if [ -e "$units/$service.service" ] || grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$service must run from measured Kubernetes manifests, not a duplicate host unit"
+    exit 1
+  fi
+done
+if ! grep -qF 'ExecStart=/usr/local/bin/c8s attest-proxy ' "$units/attest-proxy.service"; then
+  echo "::error::host attestation access must retain its fixed proxy entrypoint"
+  exit 1
+fi
+
+# A host-accessible arbitrary REPORTDATA API would let a host borrow a real
+# node's attestation for its own keys. The finalize hook preserves the selected
+# confos attester configuration and verifies that its bind is now loopback.
+finalize="$ngi/c8s/mkosi.finalize"
+if [ ! -x "$finalize" ] \
+   || ! grep -qF 'bind = "127.0.0.1:8400"' "$finalize" \
+   || ! grep -qF '"$BUILDROOT/etc/attestation-api/config.toml"' "$finalize"; then
+  echo "::error::mkosi.finalize must force and verify the attester's loopback bind"
+  exit 1
+fi
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"
