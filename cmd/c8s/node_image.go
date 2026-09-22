@@ -149,6 +149,11 @@ func renderNodeImage(ctx context.Context, cfg nodeImageRenderConfig) error {
 		"--set", "node.baked=true",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+		// volumed is deployed per cluster with `c8s install --volumes`, not
+		// baked: it needs the operator's kubelet-root and cgroup host paths,
+		// which are not known at build time. A baked node therefore serves
+		// plain PVCs through local-path; encrypted volumes (docs/volumes.md)
+		// require that separate install.
 		"--set", "volumed.enabled=false",
 		"--set", "router.attest.enabled=true",
 	)
@@ -249,16 +254,8 @@ func collectNodeImageArtifacts(rendered []byte) (*nodeImageArtifacts, error) {
 		if object.GetAPIVersion() == "" || kind == "" || name == "" {
 			return nil, fmt.Errorf("rendered chart resource requires apiVersion, kind and metadata.name")
 		}
-		switch kind {
-		case "Deployment", "DaemonSet", "ConfigMap", "ServiceAccount", "Role", "RoleBinding", "Service", "PersistentVolumeClaim", "PodDisruptionBudget", "NetworkPolicy":
-			if namespace := object.GetNamespace(); namespace != "" && namespace != nodeImageNamespace {
-				return nil, fmt.Errorf("node-image resource %s/%s has unexpected namespace %q", kind, name, namespace)
-			}
-			object.SetNamespace(nodeImageNamespace)
-		default:
-			if object.GetNamespace() != "" {
-				return nil, fmt.Errorf("cluster-scoped node-image resource %s/%s has a namespace", kind, name)
-			}
+		if err := setNodeImageNamespace(&object); err != nil {
+			return nil, err
 		}
 		key := kind + "/" + name
 		if seen[key] {
@@ -270,39 +267,12 @@ func collectNodeImageArtifacts(rendered []byte) (*nodeImageArtifacts, error) {
 			if _, expected := required[key]; !expected {
 				return nil, fmt.Errorf("unexpected node-image workload %s", key)
 			}
-			pod, found, err := unstructured.NestedMap(object.Object, "spec", "template", "spec")
-			if err != nil || !found {
-				return nil, fmt.Errorf("node-image workload %s lacks a valid pod spec", key)
-			}
-			var spec corev1.PodSpec
-			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(pod, &spec); err != nil {
-				return nil, fmt.Errorf("decode node-image workload %s: %w", key, err)
-			}
-			if len(spec.Containers) == 0 || len(spec.EphemeralContainers) != 0 {
-				return nil, fmt.Errorf("node-image workload %s requires containers and no ephemeral containers", key)
-			}
-			for _, c := range append(spec.InitContainers, spec.Containers...) {
-				ref, err := reference.ParseDockerRef(c.Image)
-				if err != nil {
-					return nil, fmt.Errorf("node-image workload %s container %q image: %w", key, c.Name, err)
-				}
-				pinned, ok := ref.(reference.Canonical)
-				if !ok || !nodeImageDigestPattern.MatchString(pinned.Digest().String()) {
-					return nil, fmt.Errorf("node-image workload %s container %q image must be pinned by sha256 digest", key, c.Name)
-				}
-				images[ref.String()] = pinned.Digest().String()
+			if err := collectWorkloadImages(object, key, images); err != nil {
+				return nil, err
 			}
 		case "ConfigMap":
-			if key == "ConfigMap/c8s-cds-allowlist-seed" || key == "ConfigMap/c8s-router-nginx" {
-				var cm corev1.ConfigMap
-				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &cm); err != nil {
-					return nil, fmt.Errorf("decode chart ConfigMap %q: %w", name, err)
-				}
-				if name == "c8s-cds-allowlist-seed" {
-					artifacts.seed = []byte(cm.Data["allowlist-seed.json"])
-				} else if cm.Data["nginx.conf"] == "" {
-					return nil, fmt.Errorf("rendered nginx ConfigMap has no nginx.conf")
-				}
+			if err := collectConfigMapArtifact(object, key, name, &artifacts); err != nil {
+				return nil, err
 			}
 		case "CustomResourceDefinition", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding", "Service", "PersistentVolumeClaim", "PodDisruptionBudget", "NetworkPolicy", "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration", "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding":
 		default:
@@ -344,4 +314,71 @@ func collectNodeImageArtifacts(rendered []byte) (*nodeImageArtifacts, error) {
 	slices.Sort(artifacts.images)
 	artifacts.integration = manifests.Bytes()
 	return &artifacts, nil
+}
+
+// setNodeImageNamespace pins a namespaced resource to the node-image namespace
+// and rejects one the chart placed elsewhere. Cluster-scoped kinds must carry
+// no namespace at all, so a namespaced rendering of them is an error.
+func setNodeImageNamespace(object *unstructured.Unstructured) error {
+	kind, name := object.GetKind(), object.GetName()
+	switch kind {
+	case "Deployment", "DaemonSet", "ConfigMap", "ServiceAccount", "Role", "RoleBinding", "Service", "PersistentVolumeClaim", "PodDisruptionBudget", "NetworkPolicy":
+		if namespace := object.GetNamespace(); namespace != "" && namespace != nodeImageNamespace {
+			return fmt.Errorf("node-image resource %s/%s has unexpected namespace %q", kind, name, namespace)
+		}
+		object.SetNamespace(nodeImageNamespace)
+	default:
+		if object.GetNamespace() != "" {
+			return fmt.Errorf("cluster-scoped node-image resource %s/%s has a namespace", kind, name)
+		}
+	}
+	return nil
+}
+
+// collectWorkloadImages records every container image a baked workload runs,
+// keyed by reference. The rootfs preloads exactly these, so an unpinned or
+// tag-only image would leave the node pulling at boot: reject it here.
+func collectWorkloadImages(object unstructured.Unstructured, key string, images map[string]string) error {
+	pod, found, err := unstructured.NestedMap(object.Object, "spec", "template", "spec")
+	if err != nil || !found {
+		return fmt.Errorf("node-image workload %s lacks a valid pod spec", key)
+	}
+	var spec corev1.PodSpec
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(pod, &spec); err != nil {
+		return fmt.Errorf("decode node-image workload %s: %w", key, err)
+	}
+	if len(spec.Containers) == 0 || len(spec.EphemeralContainers) != 0 {
+		return fmt.Errorf("node-image workload %s requires containers and no ephemeral containers", key)
+	}
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		ref, err := reference.ParseDockerRef(c.Image)
+		if err != nil {
+			return fmt.Errorf("node-image workload %s container %q image: %w", key, c.Name, err)
+		}
+		pinned, ok := ref.(reference.Canonical)
+		if !ok || !nodeImageDigestPattern.MatchString(pinned.Digest().String()) {
+			return fmt.Errorf("node-image workload %s container %q image must be pinned by sha256 digest", key, c.Name)
+		}
+		images[ref.String()] = pinned.Digest().String()
+	}
+	return nil
+}
+
+// collectConfigMapArtifact lifts the two ConfigMaps the build consumes as
+// files: the CDS bootstrap seed, which is written beside the manifests, and
+// the router's nginx.conf, which is only checked for being non-empty.
+func collectConfigMapArtifact(object unstructured.Unstructured, key, name string, artifacts *nodeImageArtifacts) error {
+	if key != "ConfigMap/c8s-cds-allowlist-seed" && key != "ConfigMap/c8s-router-nginx" {
+		return nil
+	}
+	var cm corev1.ConfigMap
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &cm); err != nil {
+		return fmt.Errorf("decode chart ConfigMap %q: %w", name, err)
+	}
+	if name == "c8s-cds-allowlist-seed" {
+		artifacts.seed = []byte(cm.Data["allowlist-seed.json"])
+	} else if cm.Data["nginx.conf"] == "" {
+		return fmt.Errorf("rendered nginx ConfigMap has no nginx.conf")
+	}
+	return nil
 }

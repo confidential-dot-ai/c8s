@@ -15,6 +15,9 @@ NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/run
+# Only to chgrp the socket it creates at --socket to --socket-gid, so the
+# non-root workloads in that group can connect. Nothing under /dev is
+# touched: the hardware attester is reached over --upstream on loopback.
 CapabilityBoundingSet=CAP_CHOWN
 
 [Install]
