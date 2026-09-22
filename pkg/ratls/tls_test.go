@@ -630,7 +630,7 @@ func TestCertManagerRotationFailCallback(t *testing.T) {
 	var failCount atomic.Int32
 	var callCount atomic.Int32
 	cfg := testServerConfig()
-	cfg.CertTTL = 100 * time.Millisecond
+	cfg.CertTTL = 4 * time.Second
 	cfg.AttestFunc = func(ctx context.Context, customData string) (string, error) {
 		n := callCount.Add(1)
 		if n > 1 {
@@ -650,13 +650,10 @@ func TestCertManagerRotationFailCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait past rotation window (50% of 100ms = 50ms).
-	time.Sleep(60 * time.Millisecond)
-
 	// Trigger background rotation (which will fail).
 	state := mgr.state
 	if state.rotating.CompareAndSwap(false, true) {
-		state.backgroundProvision(state.provider, state.rotateAt)
+		state.backgroundProvision(context.Background(), state.provider, state.revision)
 	}
 
 	// The failure callback should have been called.
@@ -1302,7 +1299,7 @@ func TestBackgroundProvisionRotationTimeout(t *testing.T) {
 			p := &deadlineProvider{cert: generateSimpleCert(t)}
 			s := &certState{provider: p, rotationTimeout: tt.timeout}
 			start := time.Now()
-			s.backgroundProvision(p, s.rotateAt)
+			s.backgroundProvision(context.Background(), p, s.revision)
 			if !p.ok {
 				t.Fatal("provisioning context has no deadline")
 			}
@@ -1318,7 +1315,7 @@ func TestBackgroundProvisionRotateAtHalvesDefaultTTL(t *testing.T) {
 	p := &mockProvider{cert: cert, ttl: 0}
 	s := &certState{provider: p, defaultTTL: 10 * time.Hour}
 	start := time.Now()
-	s.backgroundProvision(p, s.rotateAt)
+	s.backgroundProvision(context.Background(), p, s.revision)
 	s.mu.RLock()
 	got := s.cert
 	s.mu.RUnlock()
@@ -1332,7 +1329,8 @@ func TestBackgroundProvisionDiscardsStaleProvider(t *testing.T) {
 	current := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
 	stale := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
 	s := &certState{provider: current}
-	s.backgroundProvision(stale, s.rotateAt)
+	s.revision = 1
+	s.backgroundProvision(context.Background(), stale, 0)
 	s.mu.RLock()
 	got := s.cert
 	s.mu.RUnlock()
