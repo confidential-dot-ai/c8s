@@ -28,6 +28,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
 // TestHandlerReleasesServerCA drives POST /release-credential end to end and
 // checks the wire response: CAPEM is the serving-CA PEM verbatim and the
 // issued cert chains to the client CA.
@@ -61,6 +65,9 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	issuedAt := time.Now().Truncate(time.Second).Add(5 * time.Minute)
+	h.clock = fixedClock{now: issuedAt}
 
 	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -99,9 +106,14 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(ca.cert)
-	if _, err := parseLeaf(t, []byte(resp.CertPEM)).Verify(x509.VerifyOptions{
-		Roots:     roots,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	leaf := parseLeaf(t, []byte(resp.CertPEM))
+	if !leaf.NotBefore.Equal(issuedAt.Add(-time.Minute)) || !leaf.NotAfter.Equal(issuedAt.Add(time.Hour)) {
+		t.Errorf("certificate validity = %v..%v, want injected clock %v with one-minute backdate and one-hour TTL", leaf.NotBefore, leaf.NotAfter, issuedAt)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:       roots,
+		CurrentTime: issuedAt,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
 		t.Errorf("released cert does not chain to the client CA: %v", err)
 	}

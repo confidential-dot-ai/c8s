@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
@@ -23,11 +22,11 @@ type options struct {
 
 // NewCmd returns the `c8s volume` command tree.
 func NewCmd() *cobra.Command {
-	return newCmd(localverify.Verify)
+	return newCmd(nil)
 }
 
-func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{Verify: verify}
+func newCmd(verifier cdsconn.PinVerifier) *cobra.Command {
+	o := &options{Options: cdsconn.Options{Verifier: verifier}}
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Build encrypted volumes and store their keys in CDS",

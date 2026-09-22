@@ -150,7 +150,7 @@ spec:
             - --allowed-cn-pattern={{ .Values.cds.cnPattern }}
             {{- end }}
             {{- if .Values.cds.measurementsConfig }}
-            - --measurements-config=/etc/c8s-measurements/cds.json
+            - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}

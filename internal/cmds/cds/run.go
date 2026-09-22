@@ -51,9 +51,20 @@ func run(cfg config) error {
 	}
 	// Resolve before validateConfig: the secrets predicate reads the flat
 	// lists, so a config-mode start must fill them first.
-	pinned, err := resolveMeasurementsConfig(&cfg)
+	pinned, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
+		Source:       cmdsutil.ImagePolicySource{File: cfg.measurementsConfig},
+		Pins:         cmdsutil.MeasurementPins{Measurements: cfg.measurements, Registers: cfg.rtmrs},
+		Platform:     cfg.ratlsPlatform,
+		PlatformFlag: "--ratls-platform",
+	})
 	if err != nil {
 		return err
+	}
+	if !pinned.Empty() {
+		digests, common, _ := pinned.Flatten()
+		cfg.measurements = digests
+		cfg.rtmrs = refvalues.FormatRTMRPins(common)
+		slog.Info("image policy loaded", "tee", pinned.Family, "images", len(pinned.Images))
 	}
 	if err := validateConfig(cfg); err != nil {
 		return err
@@ -276,7 +287,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
-			ImagePins:         pinned.Images,
+			Images:            pinned.Images,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

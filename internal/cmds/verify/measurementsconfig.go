@@ -56,33 +56,33 @@ func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA2
 // operator believes.
 func checkServedMeasurements(want refvalues.ReferenceValues, report measurementsReport, fail func(string, ...any)) {
 	if report.fetchErr != nil {
-		fail("could not fetch /measurements to check it against --measurements-config: %v", report.fetchErr)
+		fail("could not fetch /measurements to check it against --image-policy-file: %v", report.fetchErr)
 		return
 	}
 	if !report.fetched {
-		fail("--measurements-config cannot be checked: %s", report.note)
+		fail("--image-policy-file cannot be checked: %s", report.note)
 		return
 	}
 	if len(report.served.Images) == 0 {
-		fail("the target serves an empty measurement set: it admits any TEE attestation, while --measurements-config pins %d image(s)", len(want.Images))
+		fail("the target serves an empty measurement set: it admits any TEE attestation, while --image-policy-file pins %d image(s)", len(want.Images))
 		return
 	}
 	if want.Family != report.served.Family {
-		fail("--measurements-config is for %q but the target enforces %q", want.Family, report.served.Family)
+		fail("--image-policy-file is for %q but the target enforces %q", want.Family, report.served.Family)
 		return
 	}
 	missing, extra := refvalues.Diff(want, report.served)
 	for _, e := range extra {
-		fail("the target admits an image --measurements-config does not pin: %s (%x)", e.Name, e.Digest)
+		fail("the target admits an image --image-policy-file does not pin: %s (%x)", e.Name, e.Digest)
 	}
 	for _, e := range missing {
-		fail("--measurements-config pins an image the target does not admit: %s (%x)", e.Name, e.Digest)
+		fail("--image-policy-file pins an image the target does not admit: %s (%x)", e.Name, e.Digest)
 	}
 }
 
 // gatherMeasurements fetches the set the target reports enforcing. Like the
 // operator-key fetch it never fails the run here; a fetch error is recorded so
-// checkServedMeasurements can fail the verdict when --measurements-config
+// checkServedMeasurements can fail the verdict when --image-policy-file
 // asked for the check, rather than letting an erroring endpoint dodge it.
 func gatherMeasurements(ctx context.Context, cfg config, ev *evidence) measurementsReport {
 	if cfg.measurementsConfig == "" {

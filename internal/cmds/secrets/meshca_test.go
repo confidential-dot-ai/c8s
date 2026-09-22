@@ -23,6 +23,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -149,7 +150,7 @@ func runAttested(t *testing.T, stdin string, args ...string) (stdout, stderr str
 		match := true
 		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
 	}
-	cmd := newCmd(approve)
+	cmd := newCmd(testutil.VerifierStub(approve))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

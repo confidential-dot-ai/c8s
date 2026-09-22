@@ -75,12 +75,21 @@ type allowlistConfig struct {
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
-	URL               string        `yaml:"url"`                 // empty disables pull
-	Interval          time.Duration `yaml:"interval"`            // ticker cadence; > 0 required when URL is set
-	Timeout           time.Duration `yaml:"timeout"`             // per-request timeout; > 0 required when URL is set
-	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
-	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
-	CDSRTMRs          []string      `yaml:"cds_rtmrs"`           // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	URL                   string        `yaml:"url"`                     // empty disables pull
+	Interval              time.Duration `yaml:"interval"`                // ticker cadence; > 0 required when URL is set
+	Timeout               time.Duration `yaml:"timeout"`                 // per-request timeout; > 0 required when URL is set
+	AttestationApiURL     string        `yaml:"attestation_api_url"`     // required for https pull
+	CDSMeasurements       []string      `yaml:"cds_measurements"`        // SHA-384 hex launch digests
+	CDSRTMRs              []string      `yaml:"cds_rtmrs"`               // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	CDSMeasurementsConfig string        `yaml:"cds_measurements_config"` // complete CDS image and operator identity policy
+}
+
+// validatePolicyInputs rejects competing CDS identity policy sources before I/O.
+func (c pullConfig) validatePolicyInputs() error {
+	if c.CDSMeasurementsConfig != "" && (len(c.CDSMeasurements) != 0 || len(c.CDSRTMRs) != 0) {
+		return fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
+	}
+	return nil
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -260,6 +269,9 @@ func (c *config) Validate() error {
 		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")
 	}
 	if c.PullEnabled() {
+		if err := c.Allowlist.Pull.validatePolicyInputs(); err != nil {
+			return err
+		}
 		if c.Allowlist.Pull.Timeout <= 0 {
 			return fmt.Errorf("allowlist.pull.timeout must be > 0 when pull.url is set")
 		}
