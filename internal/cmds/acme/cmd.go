@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -37,6 +36,7 @@ type config struct {
 	email         string
 	challengePort int
 	httpPort      int
+	readyPort     int
 	certDir       string
 	reloadNginx   bool
 	logLevel      string
@@ -74,6 +74,7 @@ CA's duplicate-certificate limits.`,
 	f.StringVar(&cfg.email, "acme-email", "", "contact email registered with the ACME account")
 	f.IntVar(&cfg.challengePort, "challenge-port", 8402, "loopback port answering ACME HTTP-01 challenges (nginx's :80 server proxies /.well-known/acme-challenge/ to it)")
 	f.IntVar(&cfg.httpPort, "http-port", 8080, "loopback port of nginx's :80 server, probed round-trip before each order so no validation is sent at a listener that is still starting")
+	f.IntVar(&cfg.readyPort, "ready-port", 0, "port serving GET /healthz, and GET /readyz, 200 once cert.pem and key.pem exist (0 disables it). nginx's startup probe uses it: a locked node image denies exec probes")
 	f.StringVar(&cfg.certDir, "cert-dir", "/etc/c8s-acme-tls", "directory for cert.pem, key.pem, and the ACME account key")
 	f.BoolVar(&cfg.reloadNginx, "reload-nginx", true, "SIGHUP nginx after a certificate install")
 	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
@@ -108,6 +109,12 @@ func validateConfig(cfg *config) error {
 	}
 	if cfg.httpPort == cfg.challengePort {
 		return fmt.Errorf("--http-port and --challenge-port must differ, got %d", cfg.httpPort)
+	}
+	if cfg.readyPort < 0 || cfg.readyPort > 65535 {
+		return fmt.Errorf("--ready-port must be between 0 and 65535, got %d", cfg.readyPort)
+	}
+	if cfg.readyPort != 0 && (cfg.readyPort == cfg.challengePort || cfg.readyPort == cfg.httpPort) {
+		return fmt.Errorf("--ready-port must differ from --challenge-port and --http-port, got %d", cfg.readyPort)
 	}
 	return nil
 }
@@ -155,22 +162,44 @@ func run(cfg config) error {
 	})
 	mgr.httpPort = cfg.httpPort
 
-	challengeSrv := &http.Server{
-		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.challengePort)),
-		Handler:           mgr.handler(),
-		ReadHeaderTimeout: 5 * time.Second,
+	challengeAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.challengePort))
+	if _, err := cmdsutil.ServeInBackground(ctx, challengeAddr, mgr.handler(), logger); err != nil {
+		return fmt.Errorf("--challenge-port: %w", err)
 	}
-	go cmdsutil.ShutdownOnDone(ctx, challengeSrv, 5*time.Second)
-	go func() {
-		if err := challengeSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("acme challenge listener failed", "error", err)
+	if cfg.readyPort != 0 {
+		readyAddr := net.JoinHostPort("", strconv.Itoa(cfg.readyPort))
+		if _, err := cmdsutil.ServeInBackground(ctx, readyAddr, readyHandler(mgr.certPath(), mgr.keyPath()), logger); err != nil {
+			return fmt.Errorf("--ready-port: %w", err)
 		}
-	}()
+	}
 
 	logger.Info("acme sidecar running", "domains", cfg.domains, "cert_dir", cfg.certDir)
 	mgr.run(ctx)
 	logger.Info("shutting down")
 	return nil
+}
+
+// readyHandler reports whether nginx can start: its configuration names both
+// files, so it crashes until the sidecar has written at least the self-signed
+// placeholder. The kubelet cannot dial the loopback challenge listener, and a
+// locked node image denies the exec probe this replaces, so the check gets its
+// own listener on the pod IP. It exposes existence, never content.
+func readyHandler(paths ...string) http.Handler {
+	mux := http.NewServeMux()
+	// Liveness is the process answering; the same shape as the other sidecars.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		for _, path := range paths {
+			if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+				http.Error(w, "certificate not written yet", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		fmt.Fprintln(w, "ready")
+	})
+	return mux
 }
 
 func newLogger(level string) (*slog.Logger, error) {

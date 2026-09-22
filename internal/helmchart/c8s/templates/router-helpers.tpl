@@ -486,6 +486,7 @@ nginx :80 server, and the cert-path helpers below.
 {{- define "router.acmeCertDir" -}}/etc/c8s-acme-tls{{- end -}}
 {{- define "router.acmeChallengePort" -}}8402{{- end -}}
 {{- define "router.acmeHTTPPort" -}}8080{{- end -}}
+{{- define "router.acmeReadyPort" -}}8403{{- end -}}
 
 {{/*
 Path to the public-TLS certificate nginx serves: the publicTLS Secret

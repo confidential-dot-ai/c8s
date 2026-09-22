@@ -42,6 +42,7 @@ type config struct {
 	socket            string
 	socketGID         int
 	upstream          string
+	healthAddr        string
 	readHeaderTimeout time.Duration
 }
 
@@ -63,14 +64,16 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.socket, "socket", "", "Unix socket path to serve on (absolute; created 0660, chgrp'd to --socket-gid)")
 	f.IntVar(&cfg.socketGID, "socket-gid", workloadclaims.InventorySocketGID, "group that may connect to the socket (0 = keep the process group)")
 	f.StringVar(&cfg.upstream, "upstream", defaultUpstream, "attestation-api base URL (the pod-loopback listener in the same pod)")
+	f.StringVar(&cfg.healthAddr, "health-addr", "", "TCP address serving GET /healthz for the kubelet's probes (empty disables it)")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout on the socket listener")
 	cmd.AddCommand(newHealthcheckCmd())
 	return cmd
 }
 
-// newHealthcheckCmd returns the probe subcommand the DaemonSet's exec probes
-// run: it dials the socket through the attestation client (owner/mode checks
-// included), so a passing probe covers socket, proxy, and upstream at once.
+// newHealthcheckCmd returns the one-shot probe subcommand. The node-CVM
+// DaemonSet probes --health-addr instead — a locked node image denies every
+// runc exec, so an exec probe can never pass there — but the same check as a
+// command stays useful from a shell on the node.
 func newHealthcheckCmd() *cobra.Command {
 	var socket string
 	cmd := &cobra.Command{
@@ -122,11 +125,41 @@ func serve(ctx context.Context, cfg config, proxy http.Handler, listener net.Lis
 	}
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
+	// Started after the socket is bound so a probe never passes before the
+	// front door is up.
+	if cfg.healthAddr != "" {
+		addr, err := cmdsutil.ServeInBackground(ctx, cfg.healthAddr, healthHandler(cfg.socket), slog.Default())
+		if err != nil {
+			return fmt.Errorf("--health-addr: %w", err)
+		}
+		slog.Info("attestation proxy health endpoint listening", "addr", addr)
+	}
+
 	slog.Info("attestation proxy listening", "socket", cfg.socket, "upstream", cfg.upstream)
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// healthHandler answers the kubelet's HTTP probe by running the healthcheck
+// subcommand's check in process: a GET /health round-trip over the proxy's own
+// socket, which covers socket, proxy and upstream at once. The response body
+// carries no evidence, so exposing it on the pod IP adds no reachable surface
+// beyond "is this DaemonSet serving".
+func healthHandler(socket string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), healthcheckTimeout)
+		defer cancel()
+		if _, err := remote.NewClient("unix://" + socket).Health(ctx); err != nil {
+			slog.Warn("attestation proxy healthcheck failed", "socket", socket, "error", err)
+			http.Error(w, "attestation-api unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, "ok")
+	})
+	return mux
 }
 
 func newProxy(cfg config) (http.Handler, error) {
@@ -135,6 +168,11 @@ func newProxy(cfg config) (http.Handler, error) {
 	}
 	if cfg.readHeaderTimeout <= 0 {
 		return nil, fmt.Errorf("--read-header-timeout must be positive")
+	}
+	if cfg.healthAddr != "" {
+		if _, _, err := net.SplitHostPort(cfg.healthAddr); err != nil {
+			return nil, fmt.Errorf("--health-addr %q must be host:port: %w", cfg.healthAddr, err)
+		}
 	}
 	target, err := url.Parse(cfg.upstream)
 	if err != nil || target.Host == "" {

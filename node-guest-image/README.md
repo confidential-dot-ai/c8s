@@ -27,10 +27,14 @@ Layout:
   contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
+
   The locked image keeps the kubelet debugging handlers on so `kubectl logs`
   works for every kubeconfig holder, and bakes the `pod-exec-policy.yaml`
   AddOn so `kubectl exec`, `attach`, `port-forward` and `debug` (ephemeral
-  containers) are denied in admission for everyone, the operator included;
+  containers) are denied in admission for everyone, the operator included, 
+  and routes every ordinary pod through the measured
+  runtime wrapper, which denies `runc exec` outright — see
+  [Post-start exec](#post-start-exec).
   `C8S_DEV=1` skips that AddOn (with the serial autologin), at a different
   measurement.
 
@@ -470,6 +474,22 @@ For manual image builds, dispatch `c8s-image-manual.yml` (Actions name:
 `gate` inputs. It builds through the same reusable builder but cannot call
 exact acceptance or promote stable aliases. `tdx-metal-e2e.yml` remains
 manually dispatchable for published-image regression and `keep_cvm` debugging.
+
+### Post-start exec
+
+The kubelet setting above closes the kubelet's HTTP API. It does not close CRI
+`ExecSync`, which is how exec probes and lifecycle exec hooks start a process
+in a running container, nor a direct call to containerd. The locked image
+points the containerd runc handler's `BinaryName` at `/usr/local/bin/c8s-runc`
+(`mkosi.extra/.../config-v3.toml.d/10-c8s-runc.toml`), a measured wrapper that
+denies `runc exec` and passes every other verb to RKE2's runc. All of those
+paths end in that one call, so all of them fail.
+
+The consequences for anything running on such a node: an exec probe never
+passes and a `preStop` exec hook never runs. c8s's own components use HTTP
+probes and SIGTERM handling instead. See
+[docs/node-exec-mode.md](../docs/node-exec-mode.md) for the wrapper, the build
+gate that proves no handler escapes it, and what to do in a new component.
 
 ## Refreshing measurements
 

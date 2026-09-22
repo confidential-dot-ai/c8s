@@ -139,6 +139,51 @@ if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
   exit 1
 fi
 
+# The locked image seals post-start exec at the runc boundary: every
+# ordinary pod runs through the measured wrapper, which denies `runc exec`
+# (c8s internal/cmds/c8srunc, docs/node-exec-mode.md). containerdcheck
+# renders the effective containerd config and proves the handlers; these
+# checks cover what a rendered config cannot show — that the wrapper the
+# config names is the binary the build installs, and that RKE2's runtime
+# auto-detection finds nothing else to add a handler for.
+wrapper_dropin="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/10-c8s-runc.toml"
+wrapper_path=$(sed -n 's/^[[:space:]]*BinaryName[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$wrapper_dropin" | head -n1)
+if [ "$wrapper_path" != "/usr/local/bin/c8s-runc" ]; then
+  echo "::error::$wrapper_dropin must set the runc handler's BinaryName to /usr/local/bin/c8s-runc (got '${wrapper_path:-none}')"
+  exit 1
+fi
+if ! grep -q "RUNC_WRAPPER_TARGET=\"\$STAGE_DIR${wrapper_path}\"" "$ngi/c8s/mkosi.sync"; then
+  echo "::error::mkosi.sync must install the runtime wrapper at $wrapper_path, the path $wrapper_dropin names"
+  exit 1
+fi
+# The wrapper execs the real runtime by absolute path; it is rke2's own runc,
+# extracted at first start under the bin symlink. Both sides pin it.
+real_runc=$(sed -n 's/^REAL_RUNC="\(.*\)"$/\1/p' "$ngi/c8s/mkosi.sync")
+if ! grep -qF "realRunc = \"$real_runc\"" internal/cmds/c8srunc/c8srunc.go; then
+  echo "::error::the wrapper's compiled real-runtime path and mkosi.sync's REAL_RUNC ($real_runc) have drifted"
+  exit 1
+fi
+# RKE2 adds a runtime handler for each of these it finds on PATH
+# (k3s pkg/agent/containerd/runtimes.go); none of them is wrapped.
+for rt in crun nvidia-container-runtime nvidia-container-runtime-experimental \
+          nvidia-container-runtime.cdi containerd-shim-lunatic-v1 \
+          containerd-shim-slight-v1 containerd-shim-spin-v2 containerd-shim-wws-v1 \
+          containerd-shim-wasmedge-v1 containerd-shim-wasmer-v1 containerd-shim-wasmtime-v1; do
+  if find "$ngi/c8s/mkosi.extra" -name "$rt" -print -quit | grep -q .; then
+    echo "::error::$ngi/c8s/mkosi.extra bakes '$rt'; RKE2 auto-detects it and adds an UNWRAPPED runtime handler"
+    exit 1
+  fi
+done
+# The gate renders RKE2's base template from a vendored copy; an RKE2 bump
+# that changes it must re-vendor, or the gate checks a config the node never
+# has.
+base_tmpl="$ngi/c8s/containerdcheck/rke2-base-v3.toml.tmpl"
+rke2_version=$(sed -n 's/^RKE2_VERSION="\(.*\)"$/\1/p' "$ngi/c8s/mkosi.sync")
+if ! grep -qF "# RKE2_VERSION: $rke2_version" "$base_tmpl"; then
+  echo "::error::$base_tmpl is vendored from another RKE2 than $rke2_version; re-vendor ContainerdConfigTemplateV3 from the k3s revision that RKE2 builds against and update its header"
+  exit 1
+fi
+
 # The rke2-role drop-ins only bind if mkosi.sync keeps staging the
 # rke2 tarball's units under /usr/local (systemd's search path);
 # the systemd harness installs its fakes at the same prefix.
