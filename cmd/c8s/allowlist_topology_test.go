@@ -66,7 +66,7 @@ func renderedTopologyAllowlist(t *testing.T, mode string) pkgallowlist.Allowlist
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := exec.CommandContext(context.Background(), "helm", args...).CombinedOutput()
+	rendered, err := exec.CommandContext(t.Context(), "helm", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, rendered)
 	}
