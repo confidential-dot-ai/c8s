@@ -617,7 +617,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		policy: &ratls.VerifyPolicy{Policy: remote.Policy{
 			Images:       refValues.Images,
 			Measurements: measurements,
-			RTMRs:        pins.manual,
+			Registers:    pins.manual,
 			AllowDebug:   cfg.allowDebug,
 		}},
 		pins:         pins,
@@ -701,7 +701,7 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := refvalues.ParseRTMRPins(cfg.rtmrs)
+	manual, err := refvalues.ParseRegisterPins(cfg.rtmrs)
 	if err != nil {
 		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
@@ -1307,7 +1307,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		// kernel and rootfs registers. A weak alternative must not borrow the
 		// completeness of an unrelated entry in the same policy.
 		for _, entry := range plan.refValues.Images {
-			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+			if len(entry.Registers[1]) != 0 && len(entry.Registers[2]) != 0 &&
 				remote.EnforceImages(response, []remote.ImagePin{entry}, teetypes.NormalizePlatform(oc.Platform)) == nil {
 				fullImagePinned = true
 				break
@@ -1491,7 +1491,7 @@ func imageRTMRMeaning(idx int) string {
 	}
 }
 
-// rtmrMeaning labels a register in operator-facing output. refvalues.ParseRTMRPins
+// rtmrMeaning labels a register in operator-facing output. refvalues.ParseRegisterPins
 // admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {

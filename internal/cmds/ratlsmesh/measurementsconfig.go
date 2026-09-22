@@ -54,7 +54,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 // flatPins supplies digest/register diagnostics; verification keeps the entries.
 func flatPins(set refvalues.ReferenceValues) (string, string) {
 	digests, common, _ := set.Flatten()
-	return strings.Join(digests, ","), strings.Join(refvalues.FormatRTMRPins(common), ",")
+	return strings.Join(digests, ","), strings.Join(refvalues.FormatRegisterPins(common), ",")
 }
 
 // checkTEEMatchesPlatform reports a config written for the other platform. It

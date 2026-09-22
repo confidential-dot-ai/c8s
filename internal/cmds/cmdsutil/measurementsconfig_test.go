@@ -25,11 +25,11 @@ func TestImagePolicySourceKeepsCompleteIdentities(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(policy.Measurements) != 0 || len(policy.RTMRs) != 0 || len(policy.Images) != 2 {
+		if len(policy.Measurements) != 0 || len(policy.Registers) != 0 || len(policy.Images) != 2 {
 			t.Fatalf("complete identities were flattened: %+v", policy)
 		}
 		for _, pin := range policy.Images {
-			if len(pin.Digest) != 48 || len(pin.RTMRs[1]) != 48 || len(pin.RTMRs[2]) != 48 || len(pin.Anchor) == 0 {
+			if len(pin.Digest) != 48 || len(pin.Registers[1]) != 48 || len(pin.Registers[2]) != 48 || len(pin.Anchor) == 0 {
 				t.Fatalf("incomplete image tuple: %+v", pin)
 			}
 		}
@@ -95,15 +95,15 @@ func TestMeasurementPolicySupportsDigestFileAndRegisterOnlyPins(t *testing.T) {
 	}
 	source := ImagePolicySource{}
 	policy, err := source.Load(MeasurementPins{Measurements: []string{register}, MeasurementsFile: path, Registers: []string{"1=" + register}})
-	if err != nil || len(policy.Measurements) != 2 || len(policy.RTMRs[1]) != 48 || len(policy.Images) != 0 {
+	if err != nil || len(policy.Measurements) != 2 || len(policy.Registers[1]) != 48 || len(policy.Images) != 0 {
 		t.Fatalf("union/register policy changed: %+v, %v", policy, err)
 	}
 	policy, err = source.Load(MeasurementPinsFromStrings("", "1="+register, "cds-"))
-	if err != nil || len(policy.Measurements) != 0 || len(policy.RTMRs[1]) != 48 || len(policy.Images) != 0 {
+	if err != nil || len(policy.Measurements) != 0 || len(policy.Registers[1]) != 48 || len(policy.Images) != 0 {
 		t.Fatalf("register-only policy was dropped: %+v, %v", policy, err)
 	}
 	policy, err = source.Load(MeasurementPinsFromStrings("", "", ""))
-	if err != nil || len(policy.Measurements) != 0 || len(policy.RTMRs) != 0 || len(policy.Images) != 0 {
+	if err != nil || len(policy.Measurements) != 0 || len(policy.Registers) != 0 || len(policy.Images) != 0 {
 		t.Fatalf("empty policy changed: %+v, %v", policy, err)
 	}
 	for _, tc := range []struct{ measurements, rtmrs, flag string }{
@@ -256,7 +256,7 @@ func TestLoadImagePolicyValuesKeepsPerImageRTMRs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values.Images) != 2 || len(values.Images[0].RTMRs) != 1 || len(values.Images[1].RTMRs) != 1 || bytes.Equal(values.Images[0].RTMRs[1], values.Images[1].RTMRs[1]) {
+	if len(values.Images) != 2 || len(values.Images[0].Registers) != 1 || len(values.Images[1].Registers) != 1 || bytes.Equal(values.Images[0].Registers[1], values.Images[1].Registers[1]) {
 		t.Fatalf("per-image register tuples were lost: %+v", values.Images)
 	}
 }

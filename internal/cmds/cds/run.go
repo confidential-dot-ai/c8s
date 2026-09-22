@@ -67,7 +67,7 @@ func run(cfg config) error {
 	if !pinned.Empty() {
 		digests, common, _ := pinned.Flatten()
 		cfg.measurements = digests
-		cfg.rtmrs = refvalues.FormatRTMRPins(common)
+		cfg.rtmrs = refvalues.FormatRegisterPins(common)
 		slog.Info("image policy loaded", "tee", pinned.Family, "images", len(pinned.Images))
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -135,7 +135,7 @@ func run(cfg config) error {
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
-	rtmrPins, err := refvalues.ParseRTMRPins(cfg.rtmrs)
+	rtmrPins, err := refvalues.ParseRegisterPins(cfg.rtmrs)
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
@@ -221,7 +221,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Images: pinned.Images},
+			ratls.Pins{Measurements: measurementBytes, Registers: rtmrPins, Images: pinned.Images},
 			cfg.requestTimeout,
 		)
 		if err != nil {

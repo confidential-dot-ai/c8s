@@ -59,7 +59,7 @@ func TestLiveSNPEntryEnforcement(t *testing.T) {
 	for _, e := range pinned.Images {
 		d := append([]byte(nil), e.Digest...)
 		d[0] ^= 0xff
-		wrong = append(wrong, remote.ImagePin{Name: e.Name, Digest: d, RTMRs: e.RTMRs})
+		wrong = append(wrong, remote.ImagePin{Name: e.Name, Digest: d, Registers: e.Registers})
 	}
 	policy.Images = wrong
 	_, err = client.VerifyEvidence(ctx, evidence, policy)

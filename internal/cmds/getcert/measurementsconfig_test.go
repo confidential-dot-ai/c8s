@@ -26,7 +26,7 @@ func TestCDSPinsPreserveOperatorIdentities(t *testing.T) {
 		if len(pins.Images) != len(want.Images) || !bytes.Equal(pins.Images[0].Anchor, want.Images[0].Anchor) {
 			t.Fatal("CDS client dropped the operator identity")
 		}
-		if len(pins.Measurements) != 0 || len(pins.RTMRs) != 0 {
+		if len(pins.Measurements) != 0 || len(pins.Registers) != 0 {
 			t.Fatal("complete policy produced a second flat fallback")
 		}
 	}

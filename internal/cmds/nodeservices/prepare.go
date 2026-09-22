@@ -195,7 +195,7 @@ func readPolicy(path, platform string, serverOnly bool) ([]byte, error) {
 		return nil, fmt.Errorf("staged identity policy %s has invalid family or image count", path)
 	}
 	for _, pin := range pins.Images {
-		if len(pin.Anchor) == 0 || (family == teetypes.FamilyTDX && (len(pin.RTMRs[1]) == 0 || len(pin.RTMRs[2]) == 0)) {
+		if len(pin.Anchor) == 0 || (family == teetypes.FamilyTDX && (len(pin.Registers[1]) == 0 || len(pin.Registers[2]) == 0)) {
 			return nil, fmt.Errorf("staged identity policy %s requires complete image and operator pins", path)
 		}
 	}

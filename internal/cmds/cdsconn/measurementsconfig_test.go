@@ -57,9 +57,9 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 		register []byte
 		accept   bool
 	}{
-		{"server", server.Anchor, server.RTMRs[1], true},
-		{"agent same image", all.Images[1].Anchor, server.RTMRs[1], false},
-		{"server wrong image registers", server.Anchor, server.RTMRs[2], false},
+		{"server", server.Anchor, server.Registers[1], true},
+		{"agent same image", all.Images[1].Anchor, server.Registers[1], false},
+		{"server wrong image registers", server.Anchor, server.Registers[2], false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			seed := runtimemeasure.Seed(test.key)
@@ -67,7 +67,7 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 			report.Claims.LaunchDigest = hex.EncodeToString(server.Digest)
 			report.Claims.PlatformData = map[string]any{
 				"rtmr_1": hex.EncodeToString(test.register),
-				"rtmr_2": hex.EncodeToString(server.RTMRs[2]),
+				"rtmr_2": hex.EncodeToString(server.Registers[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
 			_, err := verify.Verify(context.Background(), "tdx", nil, localverify.Params{})
