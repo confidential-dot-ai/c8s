@@ -28,7 +28,7 @@ func (f evidenceGeneratorFunc) GenerateEvidence(ctx context.Context, nonce []byt
 func newAttestHandler(t *testing.T) (*Handler, *operatorauth.Signer) {
 	t.Helper()
 	signer, pub := newOperatorAuth(t)
-	handler, err := NewHandler(pub, nil, defaultCertOrg, defaultCertCN, time.Hour)
+	handler, err := NewHandler(pub, nil, defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +218,7 @@ func TestRunServesAuthenticatedBootstrap(t *testing.T) {
 				ListenAddr: addr, AttestationAPIURL: stub.URL(), Platform: string(platform),
 				ClientCACert: clientCert, ClientCAKey: clientKey, ServerCACert: serverCert,
 				CertTTL: defaultCertTTL, CertOrg: defaultCertOrg, CertCN: defaultCertCN,
+				LogCertTTL: defaultLogCertTTL, LogCertOrg: defaultLogCertOrg, LogCertCN: defaultLogCertCN,
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)

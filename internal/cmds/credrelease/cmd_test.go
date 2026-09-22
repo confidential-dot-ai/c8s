@@ -25,6 +25,9 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 		{"cert-ttl", "1h0m0s"},
 		{"cert-org", "c8s:node-operators"},
 		{"cert-cn", "operator"},
+		{"log-cert-ttl", "24h0m0s"},
+		{"log-cert-org", "c8s:log-readers"},
+		{"log-cert-cn", "log-reader"},
 	}
 	flags := cmd.Flags()
 	for _, tt := range defaults {
