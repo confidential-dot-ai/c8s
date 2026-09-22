@@ -12,11 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/nri/pkg/api"
+
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
-	"github.com/containerd/nri/pkg/api"
 )
 
 func newTestPlugin(cfg *config) *plugin {
@@ -59,7 +60,13 @@ func TestCheckImage_MissingAnnotation_DenyEnabled(t *testing.T) {
 		},
 	})
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "", nil)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "",
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny, got %d", verdict)
 	}
@@ -75,7 +82,13 @@ func TestCheckImage_MissingAnnotation_DenyDisabled(t *testing.T) {
 		},
 	})
 
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "", nil)
+	verdict, _ := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "",
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictSkip {
 		t.Fatalf("expected verdictSkip, got %d", verdict)
 	}
@@ -705,7 +718,13 @@ func TestCheckImage_DigestInAllowlist_Allows(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", imageRef, nil)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  imageRef,
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictAllow {
 		t.Fatalf("expected verdictAllow, got %d (reason=%q)", verdict, reason)
 	}
@@ -719,7 +738,13 @@ func TestCheckImage_DigestNotInAllowlist_Denies(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", imageRef, nil)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  imageRef,
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny, got %d", verdict)
 	}
@@ -734,7 +759,13 @@ func TestCheckImage_NoPolicyLoaded_Denies(t *testing.T) {
 		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	s.snap.Store(nil) // no admission snapshot loaded
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", imageRef, nil)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  imageRef,
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny when no policy is loaded, got %d", verdict)
 	}
@@ -762,8 +793,14 @@ func TestCheckImage_AnyArgvEntry_AdmitsAnyArgv(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestA, []string{"/anything", "--wild"})
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestA,
+		Argv:      []string{"/anything", "--wild"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictAllow {
 		t.Fatalf("an any-argv entry should admit any argv, got %d (reason=%q)", verdict, reason)
 	}
@@ -777,13 +814,25 @@ func TestCheckImage_BaseAdmitsByDigestAlone(t *testing.T) {
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, &allowlist.Allowlist{Schema: allowlist.Schema})
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestA, []string{"/anything"})
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestA,
+		Argv:      []string{"/anything"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictAllow {
 		t.Fatalf("a base digest should be admitted, got %d (reason=%q)", verdict, reason)
 	}
-	if verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/anything"}); verdict != verdictDeny {
+	if verdict, _ := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestB,
+		Argv:      []string{"/anything"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal); verdict != verdictDeny {
 		t.Fatalf("a digest outside the base allowlist and the served index must be denied, got %d", verdict)
 	}
 }
@@ -792,8 +841,14 @@ func TestCheckImage_WorkloadDigest_ArgvMatchAdmits(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestB,
+		Argv:      []string{"/bin/app", "--serve"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictAllow {
 		t.Fatalf("matching argv should admit workload digest, got %d (reason=%q)", verdict, reason)
 	}
@@ -803,8 +858,14 @@ func TestCheckImage_WorkloadDigest_ArgvMismatchDenies(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
 
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
+	verdict, _ := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestB,
+		Argv:      []string{"/bin/evil"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("non-matching argv should deny workload digest, got %d", verdict)
 	}
@@ -816,14 +877,26 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
 
-	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args or env policy") {
+	_, argvMismatch := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestB,
+		Argv:      []string{"/bin/evil"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args, env or mounts policy") {
 		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
 	}
 
-	_, unlisted := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestC, []string{"/bin/app"})
+	_, unlisted := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestC,
+		Argv:      []string{"/bin/app"},
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if !strings.Contains(unlisted, "image not in allowlist") {
 		t.Fatalf("an unlisted digest should keep the not-in-allowlist denial, got %q", unlisted)
 	}
@@ -1557,28 +1630,32 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 }
 
-// The NRI path leaves bind mounts unobserved.
-func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+func TestCheckImage_ExactMountPolicyRequiresFinalObservation(t *testing.T) {
 	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 	c := al.Workloads["w"].Containers[0]
-	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
+	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact, Rules: []allowlist.MountRule{{Destination: "/expected", Kind: allowlist.MountEmptyDir}}}
 	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
 	al.Workloads["w"].Containers[0] = c
 
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}}, al)
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
-	if verdict != verdictAllow {
-		t.Fatalf("host path must leave mounts unobserved, got verdict %d (reason=%q)", verdict, reason)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo@" + pushDigestB,
+		Argv:      []string{"/bin/app", "--serve"},
+	}, launchFinal)
+	if verdict != verdictDeny {
+		t.Fatalf("unobserved exact mounts: verdict %d, want deny (reason=%q)", verdict, reason)
 	}
 
 	// Non-vacuity: the same entry refuses a container that does report one, so
 	// the admit above is this plugin's silence rather than a dead policy.
 	if p.policy.current().index.AdmitsContainer(allowlist.RunningContainer{
-		Digest:     pushDigestB,
-		Argv:       []string{"/bin/app", "--serve"},
-		BindMounts: []string{"/injected"},
+		Digest: pushDigestB,
+		Argv:   []string{"/bin/app", "--serve"},
+		Mounts: []allowlist.ObservedMount{{Destination: "/injected", Class: allowlist.MountHost, Storage: allowlist.MountUnknown}},
 	}) {
 		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
 	}

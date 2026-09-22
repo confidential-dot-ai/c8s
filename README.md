@@ -93,9 +93,12 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   tenant host-namespace access. The bootstrap ordering fails closed, never open.
 
 - **Confidential GPUs.** NVIDIA GPUs attached to confidential nodes on
-  SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
-  NVIDIA GPU and NVSwitch evidence; it is not wired into the c8s certificate
-  flow end to end, see [Known gaps](#known-gaps-and-open-items).
+  SEV-SNP and TDX hosts, with GPU CC mode. Before a node sets the GPU CC
+  Ready state it attests every GPU through its baked attestation service
+  (SPDM evidence verified via NRAS, nonce-bound to the CPU TEE evidence) and
+  powers off on any failure. That verdict stays inside the node; it is not
+  wired into the c8s certificate flow, see
+  [Known gaps](#known-gaps-and-open-items).
 
 - **Verifiable from a browser.** A challenge-response protocol and a
   post-quantum over-encrypted channel let end users verify the cluster with
@@ -505,12 +508,13 @@ than let you discover them:
   [docs/volumes.md](docs/volumes.md).
 
 - **GPU attestation is not wired end to end.** GPU passthrough into
-  confidential nodes works, and the node CVM fails closed on a non-CC GPU.
+  confidential nodes works, and the node CVM fails closed unless every GPU
+  is in CC mode and its attestation verifies before the CC Ready state is
+  set (`gpu-cc-enforce.service`, via the node's baked
   [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
-  verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
-  CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
-  require it at certificate issuance, so no positive GPU attestation reaches
-  the relying party.
+  and NRAS). That is a self-check inside the measured node: CDS does not
+  require GPU evidence at certificate issuance, so no positive GPU
+  attestation reaches the relying party.
 
 - **The browser over-encryption channel does not stream.** Requests and
   responses are buffered per envelope; responses over 32 MiB fail rather than
@@ -523,9 +527,9 @@ than let you discover them:
 
 The direction of travel:
 
-- **GPU attestation end to end.** Collect GPU evidence in the guest and
-  require it at certificate issuance, so a positive GPU attestation reaches
-  the relying party rather than stopping at the attestation service.
+- **GPU attestation end to end.** Require GPU evidence at certificate
+  issuance, so a positive GPU attestation reaches the relying party rather
+  than stopping at the node's boot-time self-check.
 
 - **In-TEE volume encryption.** Stream plaintext into a CVM that generates the
   key, writes the encrypted volume, and commits the key straight to the secret

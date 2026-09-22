@@ -23,7 +23,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
@@ -234,17 +233,35 @@ func postAttest(ctx context.Context, attestURL string, nonce []byte) ([]byte, er
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	return readAttestationResponse(http.DefaultClient, req)
+}
+
+// readAttestationResponse bounds the evidence envelope on both bootstrap paths.
+func readAttestationResponse(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		const maxErrorBody = 1024
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
+		if err != nil {
+			return nil, err
+		}
+		suffix := ""
+		if len(respBody) > maxErrorBody {
+			respBody = respBody[:maxErrorBody]
+			suffix = "... (truncated)"
+		}
+		return nil, fmt.Errorf("attest HTTP %d: %s%s", resp.StatusCode, respBody, suffix)
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("attest HTTP %d: %s", resp.StatusCode, respBody)
+	if len(respBody) > 8<<20 {
+		return nil, fmt.Errorf("attestation response exceeds 8 MiB")
 	}
 	return respBody, nil
 }

@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// Key identifies a (digest, argv, env) admission in the cumulative inventory.
+// Key identifies a (digest, argv, env, mounts) admission in the
+// cumulative inventory. Mount source paths are excluded from identity.
 // The framing must be injective: a collision erases historical evidence and can
 // allow a sandbox to match a workload it did not actually run.
 func (c SandboxContainer) Key() string {
@@ -27,12 +28,23 @@ func (c SandboxContainer) Key() string {
 		field(c.Env.Format)
 		field(c.Env.Digest)
 	}
+	if c.Mounts == nil {
+		b = append(b, 0)
+	} else {
+		b = append(b, 1)
+		b = binary.AppendUvarint(b, uint64(len(c.Mounts)))
+		for _, m := range c.Mounts {
+			field(m.Destination)
+			field(string(m.Class))
+			field(string(m.Storage))
+		}
+	}
 	return string(b)
 }
 
-// Compare orders containers by digest, argv, then env — the stable order the
-// digests endpoint serves, so identical sandboxes report identical
-// inventories.
+// Compare orders containers by digest, argv, then the full admission key.
+// The digests endpoint uses this stable order so identical sandboxes report
+// identical inventories.
 func (c SandboxContainer) Compare(o SandboxContainer) int {
 	return cmp.Or(strings.Compare(c.Digest, o.Digest), slices.Compare(c.Argv, o.Argv), strings.Compare(c.Key(), o.Key()))
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
@@ -65,20 +64,38 @@ type workloadClaimsConfig struct {
 // Base is a static baseline in the allowlist document format, admitted ahead
 // of every pulled snapshot (CDS and operator digests). Installer and busybox
 // invocations are admitted by argv-pinned entries in the served document.
+// Base entries enforce env and mounts at final admission just like served
+// entries. Generated system-image entries explicitly leave those fields open.
 // Pull is the runtime-update source: every plugin polls CDS.
 type allowlistConfig struct {
 	Base *allowlist.Allowlist `yaml:"base"`
-	Pull pullConfig           `yaml:"pull"`
+	// NodeTCB marks the base allowlist as this node's trusted computing base:
+	// its digests are the only ones exempt from the sandbox policy
+	// (policy.sandbox). Only a MEASURED boot config may set it — the chart
+	// leaves it unset, because a chart-rendered base is chosen by the same
+	// cluster admin the policy defends against. It is a boot-config key, not
+	// an allowlist field: a CDS-served document has no way to express it.
+	NodeTCB bool       `yaml:"node_tcb"`
+	Pull    pullConfig `yaml:"pull"`
 }
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
-	URL               string        `yaml:"url"`                 // empty disables pull
-	Interval          time.Duration `yaml:"interval"`            // ticker cadence; > 0 required when URL is set
-	Timeout           time.Duration `yaml:"timeout"`             // per-request timeout; > 0 required when URL is set
-	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
-	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
-	CDSRTMRs          []string      `yaml:"cds_rtmrs"`           // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	URL                   string        `yaml:"url"`                     // empty disables pull
+	Interval              time.Duration `yaml:"interval"`                // ticker cadence; > 0 required when URL is set
+	Timeout               time.Duration `yaml:"timeout"`                 // per-request timeout; > 0 required when URL is set
+	AttestationApiURL     string        `yaml:"attestation_api_url"`     // required for https pull
+	CDSMeasurements       []string      `yaml:"cds_measurements"`        // SHA-384 hex launch digests
+	CDSRTMRs              []string      `yaml:"cds_rtmrs"`               // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	CDSMeasurementsConfig string        `yaml:"cds_measurements_config"` // complete CDS image and operator identity policy
+}
+
+// validatePolicyInputs rejects competing CDS identity policy sources before I/O.
+func (c pullConfig) validatePolicyInputs() error {
+	if c.CDSMeasurementsConfig != "" && (len(c.CDSMeasurements) != 0 || len(c.CDSRTMRs) != 0) {
+		return fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
+	}
+	return nil
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -93,6 +110,12 @@ type policyConfig struct {
 	EnforceExisting       bool        `yaml:"enforce_existing"`        // kill non-allowlisted containers on startup
 	DenyMissingAnnotation bool        `yaml:"deny_missing_annotation"` // deny containers without image annotation
 	LabelRules            []labelRule `yaml:"label_rules"`
+
+	// Sandbox is the host-privilege policy applied to every container the
+	// base allowlist does not admit: enforce denies, audit records the
+	// observation and admits, off does not observe. A parsed config defaults to
+	// enforce; see sandbox.go and docs/allowlist-and-capabilities.md.
+	Sandbox sandboxMode `yaml:"sandbox"`
 
 	// ExemptNamespaces admits a namespace's containers by the digests captured
 	// running in it at first admission, not by a name the control plane picks.
@@ -148,7 +171,7 @@ type loggingConfig struct {
 	Level string `yaml:"level"`
 }
 
-const defaultPullInterval = 30 * time.Second
+const defaultPullInterval = 5 * time.Second
 const defaultPullTimeout = 30 * time.Second
 
 // NodeIPFile is the filename, inside SocketDir, the installer writes this
@@ -187,6 +210,7 @@ func parseConfig(data []byte) (*config, error) {
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
 			DenyMissingAnnotation: true,
+			Sandbox:               SandboxEnforce,
 		},
 		Logging: loggingConfig{
 			Level: "info",
@@ -251,6 +275,19 @@ func (c *config) baseEnabled() bool {
 	return c.Allowlist.Base != nil && len(c.Allowlist.Base.Workloads) > 0
 }
 
+// sandboxMode is the effective host-privilege policy. Empty means the config
+// was built in code rather than parsed (tests, callers constructing a literal),
+// where the policy was never chosen: parseConfig defaults it to enforce.
+func (c *config) sandboxMode() sandboxMode {
+	if c.Policy.Sandbox == "" {
+		return SandboxOff
+	}
+	return c.Policy.Sandbox
+}
+
+// sandboxObserved reports whether the host-privilege observation runs at all.
+func (c *config) sandboxObserved() bool { return c.sandboxMode() != SandboxOff }
+
 // AllowlistEnabled reports whether any digest-based enforcement is active.
 func (c *config) AllowlistEnabled() bool {
 	return c.PullEnabled() || c.baseEnabled()
@@ -283,6 +320,9 @@ func (c *config) Validate() error {
 		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")
 	}
 	if c.PullEnabled() {
+		if err := c.Allowlist.Pull.validatePolicyInputs(); err != nil {
+			return err
+		}
 		if c.Allowlist.Pull.Timeout <= 0 {
 			return fmt.Errorf("allowlist.pull.timeout must be > 0 when pull.url is set")
 		}
@@ -313,6 +353,19 @@ func (c *config) Validate() error {
 	}
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
+	}
+	switch c.Policy.Sandbox {
+	case SandboxEnforce, SandboxAudit, SandboxOff:
+	case "":
+		c.Policy.Sandbox = SandboxEnforce
+	default:
+		return fmt.Errorf("policy.sandbox must be '%s', '%s' or '%s'", SandboxEnforce, SandboxAudit, SandboxOff)
+	}
+	// The marker grants the base an exemption, so an empty base makes it a
+	// statement about nothing — and a config that carries it without one is
+	// more likely a key in the wrong section than an intent.
+	if c.Allowlist.NodeTCB && !c.baseEnabled() {
+		return fmt.Errorf("allowlist.node_tcb needs a non-empty allowlist.base: it exempts the base's digests from the sandbox policy")
 	}
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
 		return fmt.Errorf("workload_claims.socket_dir requires allowlist.base or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")

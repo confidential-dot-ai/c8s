@@ -28,14 +28,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // Pod annotations that drive sidecar injection.
@@ -147,7 +148,7 @@ const reservedCertContainerName = workloadclaims.CertContainerName
 // the workload until c8s-cert has written the initial cert (see
 // certWaitContainer). Operator-reserved like c8s-cert: a pod may not declare
 // its own container under it.
-const reservedCertWaitContainerName = "c8s-cert-wait"
+const reservedCertWaitContainerName = workloadclaims.CertWaitContainerName
 
 // Config tunes the injector.
 type Config struct {
@@ -172,6 +173,9 @@ type Config struct {
 	// about CDS's kernel or rootfs. Ignored for SNP evidence; empty pins no
 	// registers.
 	CDSRTMRs []string
+
+	// CDSMeasurementsConfigJSON retains the complete identity policy for injected clients.
+	CDSMeasurementsConfigJSON string
 
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
@@ -654,19 +658,17 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
 	// every call), so it no longer keys off the confidential.ai/c8s-injected
 	// marker: an author cannot skip injection by pre-setting it.
-	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
 	if inj == nil {
 		return admission.Allowed("no c8s annotation — passthrough")
 	}
+	getCertNeeded := m.cfg.GetCertImage != ""
 
 	// Only the webhook may place a container under the reserved c8s-cert name.
 	// The init sidecar is rebuilt below (injectInitContainers), but a
 	// regular/ephemeral collision cannot be, so reject it: get-cert injection
 	// integrity is name-based.
-	if inj != nil {
-		if err := rejectReservedCertContainer(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
+	if err := rejectReservedCertContainer(pod); err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	if getCertNeeded {
@@ -872,18 +874,10 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// get-cert names this one --cds-measurements and takes it comma-joined,
-	// where the secret and volume fetchers take a repeatable --measurements.
-	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
-		args = append(args, "--cds-measurements="+joined)
-	}
-	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
-		args = append(args, "--cds-rtmrs="+joined)
-	}
+	args = append(args, cdsPinArgs(cfg, true)...)
 	// get-cert redeems a sandbox token from the node's inventory over the
 	// mounted socket.
-	switch {
-	case cfg.WorkloadClaimsHostDir != "":
+	if cfg.WorkloadClaimsHostDir != "" {
 		args = append(args, "--workload-claims")
 	}
 	if inj.Verbose {
@@ -1102,7 +1096,7 @@ func secretsVolume() corev1.Volume {
 func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
 	reserved := reservedVolumeNames(pod)
 	for _, c := range pod.Spec.EphemeralContainers {
-		if isReservedCertName(c.Name) {
+		if workloadclaims.IsInjectedContainerName(c.Name) {
 			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s containers",
 				errInvalidInjectionAnnotation, c.Name)
 		}
@@ -1139,7 +1133,7 @@ func reservedVolumeNames(pod *corev1.Pod) map[string]bool {
 	}
 	reserved := map[string]bool{secretsVolumeName: true, certVolume: true}
 	for _, c := range pod.Spec.InitContainers {
-		if !isReservedCertName(c.Name) {
+		if !workloadclaims.IsInjectedContainerName(c.Name) {
 			continue
 		}
 		for _, m := range c.VolumeMounts {
@@ -1270,12 +1264,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Volumes.Specs {
 		args = append(args, "--volume="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1311,12 +1300,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Secrets.Specs {
 		args = append(args, "--secret="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1411,32 +1395,25 @@ func injectInitContainers(existing []corev1.Container, injected ...corev1.Contai
 }
 
 // rejectReservedCertContainer denies an opted-in pod that parks a container
-// under the reserved c8s-cert name outside the init-container slot the webhook
+// under a name c8s injects, outside the init-container slot the webhook
 // rebuilds. Such a container would survive injection and collide with the
 // injected init sidecar (names are unique across all three lists), so it can
 // only be an attempt to shed or impersonate it; init-container collisions are
 // handled by injectInitContainers instead.
 func rejectReservedCertContainer(pod *corev1.Pod) error {
 	for _, c := range pod.Spec.Containers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: container name %q is reserved for the injected c8s cert containers",
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			return fmt.Errorf("%w: container name %q is reserved for the containers c8s injects",
 				errInvalidInjectionAnnotation, c.Name)
 		}
 	}
 	for _, c := range pod.Spec.EphemeralContainers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s cert containers",
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			return fmt.Errorf("%w: ephemeral container name %q is reserved for the containers c8s injects",
 				errInvalidInjectionAnnotation, c.Name)
 		}
 	}
 	return nil
-}
-
-func isReservedCertName(name string) bool {
-	return name == reservedCertContainerName ||
-		name == reservedCertWaitContainerName ||
-		name == reservedSecretContainerName ||
-		name == reservedVolumeContainerName
 }
 
 // rejectReservedCertVolume denies a pod that pre-declares the reserved cert
@@ -1498,4 +1475,30 @@ func containerMount(c *corev1.Container, name string) *corev1.VolumeMount {
 		}
 	}
 	return nil
+}
+
+// cdsPinArgs propagates the complete CDS identity without weakening operator
+// pins into a digest-only policy. Independent digest/register inputs use
+// their corresponding flags.
+func cdsPinArgs(cfg Config, certificate bool) []string {
+	if cfg.CDSMeasurementsConfigJSON != "" {
+		return []string{"--image-policy-json=" + cfg.CDSMeasurementsConfigJSON}
+	}
+	var args []string
+	if certificate {
+		if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
+			args = append(args, "--cds-measurements="+joined)
+		}
+		if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
+			args = append(args, "--cds-rtmrs="+joined)
+		}
+		return args
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, "--measurements="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, "--rtmrs="+r)
+	}
+	return args
 }

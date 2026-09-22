@@ -283,19 +283,6 @@ func (s *Server) Handler() http.Handler {
 			"attest-pq is client-first: POST a JSON body with nonce and xwing_ek")
 	})
 	r.Method(http.MethodGet, wellKnownPrefix+"/attest-lb", s.establishing(http.HandlerFunc(s.handleAttestLB)))
-	// The pre-split endpoint. Kept registered so a stale client gets the
-	// explicit versioned 400 — never a 404 it might treat as transient, and
-	// never an alias or downgrade.
-	r.Get(wellKnownPrefix+"/attestation", func(w http.ResponseWriter, _ *http.Request) {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
-			"the /.well-known/c8s/attestation endpoint is gone: use attest-pq (encrypted session) or attest-lb (ordinary TLS)")
-	})
-	// The retired two-step handshake. attest-pq completes the key exchange in
-	// one round trip; the explicit 400 tells a stale client so.
-	r.Post(wellKnownPrefix+"/handshake", func(w http.ResponseWriter, _ *http.Request) {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
-			"the handshake endpoint is gone: attest-pq establishes the session in one POST")
-	})
 	// Over-encrypted application traffic: a single tunnel endpoint. The real
 	// method/path/headers/body are sealed inside the request envelope, so nginx
 	// only needs to route this one fixed path to the sidecar.

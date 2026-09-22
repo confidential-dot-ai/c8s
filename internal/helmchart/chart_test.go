@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -26,6 +24,9 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigsyaml "sigs.k8s.io/yaml"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // helmFailMessage extracts the user-visible message from a `helm template`
@@ -5307,7 +5308,7 @@ func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
 }
 
 // anyArgvEntryArgs renders one bootstrapAllowlist.workloads entry admitting
-// digest under any command and args, as `helm --set-string` arguments.
+// digest under any command, args, and mounts, as `helm --set-string` arguments.
 func anyArgvEntryArgs(name, digest, image string) []string {
 	p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
 	return []string{
@@ -5316,6 +5317,7 @@ func anyArgvEntryArgs(name, digest, image string) []string {
 		"--set-string", p + "containers[0].image=" + image,
 		"--set-string", p + "containers[0].command.policy=any",
 		"--set-string", p + "containers[0].args.policy=any",
+		"--set-string", p + "containers[0].mounts.policy=any",
 	}
 }
 
@@ -5363,6 +5365,65 @@ func TestChartSeedsCDSAllowlistFromBootstrapEntries(t *testing.T) {
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
 	if got := seedLabel(seed, cdsDigest); got != cdsRef {
 		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+	for _, al := range []pkgallowlist.Allowlist{*seed, worker.Allowlist.Base} {
+		for _, entry := range al.Workloads {
+			for _, c := range entry.Containers {
+				if c.Digest.String() == cdsDigest && c.Mounts.Policy != pkgallowlist.PolicyAny {
+					t.Errorf("generated CDS mount policy = %+v, want explicit any", c.Mounts)
+				}
+			}
+		}
+	}
+}
+
+func TestChartBasePreservesOperatorMountConstraints(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy string
+		want   pkgallowlist.MountPolicy
+	}{
+		{"omitted", "", pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"deny", pkgallowlist.PolicyDeny, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"exact", pkgallowlist.PolicyExact, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyExact, Rules: []pkgallowlist.MountRule{{Destination: "/cache", Kind: pkgallowlist.MountEmptyDir}}}},
+	}
+	var args []string
+	for i, tc := range cases {
+		p := "nriImagePolicy.bootstrapAllowlist.workloads." + tc.name + ".containers[0]."
+		args = append(args,
+			"--set-string", p+"digest="+fmt.Sprintf("sha256:abcdef%058d", i),
+			"--set-string", p+"command.policy=any",
+			"--set-string", p+"args.policy=any",
+		)
+		if tc.policy != "" {
+			args = append(args, "--set-string", p+"mounts.policy="+tc.policy)
+		}
+		if tc.policy == pkgallowlist.PolicyExact {
+			args = append(args,
+				"--set-string", p+"mounts.rules[0].destination=/cache",
+				"--set-string", p+"mounts.rules[0].kind=emptyDir",
+			)
+		}
+	}
+	out, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	seed := renderedSeed(t, out)
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	base := baseImages(worker.Allowlist.Base)
+	for _, tc := range cases {
+		entry, ok := seed.Workloads[tc.name]
+		if !ok || len(entry.Containers) != 1 {
+			t.Fatalf("operator entry %q missing from served seed", tc.name)
+		}
+		c := entry.Containers[0]
+		if !reflect.DeepEqual(c.Mounts, tc.want) {
+			t.Errorf("operator entry %q mount policy = %+v, want %+v", tc.name, c.Mounts, tc.want)
+		}
+		if _, ok := base[c.Digest.String()]; ok {
+			t.Errorf("operator entry %q with constrained mounts entered the boot base", tc.name)
+		}
 	}
 }
 
@@ -5781,7 +5842,7 @@ func TestChartServesAllowlistSeedInBareMetalMode(t *testing.T) {
 	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
 		t.Errorf("bare-metal-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+	const nginxD = "sha256:c2c3905bda3dc8de80023e19bed0a45745279d26e5586cdee64370c8f9b12348"
 	if _, ok := seedEntry(seed, nginxD); !ok {
 		t.Errorf("bare-metal-mode seed missing router nginx self-entry\nseed: %v", seed.Workloads)
 	}
@@ -7189,6 +7250,40 @@ func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 	}
 }
 
+// The node image bakes the pull interval too, and under nriImagePolicy.baked
+// the installer runs set-cds-pins, which rewrites only the CDS pins. So the
+// interval a node-CVM's gate actually runs on is the baked one, and a drift
+// surfaces only as a policy change that bites later than the chart says.
+func TestChartRefreshIntervalMatchesTheBakedNRIPull(t *testing.T) {
+	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
+	baked, err := os.ReadFile(bakedPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", bakedPath, err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*interval:\s*"([^"]+)"`).FindSubmatch(baked)
+	if m == nil {
+		t.Fatalf("%s carries no allowlist pull interval", bakedPath)
+	}
+	want, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("baked pull interval %q: %v", m[1], err)
+	}
+
+	var values struct {
+		NRIImagePolicy struct {
+			Refresh struct {
+				Interval time.Duration `yaml:"interval"`
+			} `yaml:"refresh"`
+		} `yaml:"nriImagePolicy"`
+	}
+	readChartFile(t, "values.yaml", &values)
+
+	if got := values.NRIImagePolicy.Refresh.Interval; got != want {
+		t.Errorf("baked NRI pull interval is %s but nriImagePolicy.refresh.interval is %s — a tightened entry reaches a node-CVM's gate on the baked value (%s)",
+			want, got, bakedPath)
+	}
+}
+
 // The root key set is closed, so a values file carried over from an older
 // release — or one with a typo above the sealed subtrees — is refused instead
 // of being silently dropped. This is the class that caused the incident the
@@ -7465,4 +7560,44 @@ func TestRouterProbesUseHTTPSHealthChecks(t *testing.T) {
 		}
 	}
 
+}
+
+func TestChartSweepMountAdmission(t *testing.T) {
+	for _, baked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("baked=%v", baked), func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", "nriImagePolicy.baked="+strconv.FormatBool(baked))
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile("c8s/files/scripts/host-sweep.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idx := seed.BuildIndex()
+			for _, tc := range []struct {
+				name            string
+				argv            []string
+				hostMount, want bool
+			}{
+				{"sweep", []string{"/bin/sh", "-c", strings.TrimRight(string(script), "\n") + "\n"}, true, true},
+				{"pause", []string{"/bin/sleep", "2147483647"}, false, true},
+				{"pause with host mount", []string{"/bin/sleep", "2147483647"}, true, false},
+				{"shell pause with host mount", []string{"/bin/sh", "-c", "sleep infinity"}, true, false},
+				{"unpinned script", []string{"/bin/sh", "-c", "echo unexpected"}, true, false},
+			} {
+				mounts := []pkgallowlist.ObservedMount{}
+				if tc.hostMount {
+					mounts = append(mounts, pkgallowlist.ObservedMount{Source: "/", Destination: "/host", Class: pkgallowlist.MountHost, Storage: pkgallowlist.MountUnknown})
+				}
+				if got := idx.AdmitsContainer(pkgallowlist.RunningContainer{Digest: baseNRIDigest, Argv: tc.argv, Mounts: mounts}); got != tc.want {
+					t.Errorf("%s admitted=%v, want %v", tc.name, got, tc.want)
+				}
+			}
+		})
+	}
 }

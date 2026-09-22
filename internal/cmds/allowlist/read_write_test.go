@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
@@ -90,7 +91,7 @@ func TestClientRejectsUnknownScheme(t *testing.T) {
 // --- signer error paths ---
 
 func TestSignerMissingKeyFile(t *testing.T) {
-	o := &options{OperatorKey: filepath.Join(t.TempDir(), "nope.key")}
+	o := &options{Options: cdsconn.Options{OperatorKey: filepath.Join(t.TempDir(), "nope.key")}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "read operator key") {
 		t.Fatalf("expected a read error, got %v", err)
 	}
@@ -102,7 +103,7 @@ func TestSignerRejectsGarbagePEM(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a pem"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	o := &options{OperatorKey: path, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}
+	o := &options{Options: cdsconn.Options{OperatorKey: path, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "load operator key") {
 		t.Fatalf("expected a key-parse error, got %v", err)
 	}
@@ -425,7 +426,7 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		"empty":{},
 		"tagged":{"label":"docker.io/library/busybox:latest","containers":[
 			{"digest":"`+digA+`","image":"docker.io/library/busybox:latest",
-			 "command":{"policy":"any"},"args":{"policy":"any"}}]},
+			 "command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]},
 		"other":{"secrets":{"policy":"allow","read":["/**"]},"containers":[
 			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
 			{"digest":"`+digB+`","command":{"policy":"deny"},"args":{"policy":"deny"}}]}}}`)

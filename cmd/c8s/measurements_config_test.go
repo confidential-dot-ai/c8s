@@ -20,11 +20,11 @@ const (
 // installPins reads package-level flag vars, so each case restores them.
 func withInstallFlags(t *testing.T, config string, measurements, rtmrs []string) {
 	t.Helper()
-	origC, origM, origR := installMeasurementsConfig, installMeasurements, installRTMRs
+	origC, origM, origR := installMeasurementsConfig, installMeasurements, installRegisters
 	t.Cleanup(func() {
-		installMeasurementsConfig, installMeasurements, installRTMRs = origC, origM, origR
+		installMeasurementsConfig, installMeasurements, installRegisters = origC, origM, origR
 	})
-	installMeasurementsConfig, installMeasurements, installRTMRs = config, measurements, rtmrs
+	installMeasurementsConfig, installMeasurements, installRegisters = config, measurements, rtmrs
 }
 
 func writePinConfig(t *testing.T, doc string) string {
@@ -68,23 +68,21 @@ func TestInstallPinsEmitsFileAndFlatValues(t *testing.T) {
 	}
 }
 
-// Images that disagree on registers cannot be flattened onto one register
-// list; the digests must still pin.
-func TestInstallPinsDropsDivergentRTMRs(t *testing.T) {
+func TestInstallPinsRefusesToDropOperatorIdentity(t *testing.T) {
+	withInstallFlags(t, "../../internal/testdata/node-identities.json", nil, nil)
+	if _, _, _, err := installPins(); err == nil || !strings.Contains(err.Error(), "baked node launch flow") {
+		t.Fatalf("operator-key policy was flattened for Helm: %v", err)
+	}
+}
+
+// NRI receives one shared register set, so nonuniform image policies must be refused.
+func TestInstallPinsRejectsDivergentRegisters(t *testing.T) {
 	path := writePinConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
 		{"name":"a","mrtd":"00`+pinDigestA+`","rtmr":[null,"`+pinReg1+`"]},
 		{"name":"b","mrtd":"00`+pinDigestB+`","rtmr":[null,"`+pinReg2+`"]}]}`)
 	withInstallFlags(t, path, nil, nil)
-
-	digests, rtmrs, _, err := installPins()
-	if err != nil {
-		t.Fatalf("installPins: %v", err)
-	}
-	if len(rtmrs) != 0 {
-		t.Errorf("rtmrs = %v, want none: the images disagree", rtmrs)
-	}
-	if len(digests) != 2 {
-		t.Errorf("got %d digests, want both images still pinned", len(digests))
+	if digests, rtmrs, args, err := installPins(); err == nil || !strings.Contains(err.Error(), "identical register pins") || len(digests)+len(rtmrs)+len(args) != 0 {
+		t.Fatalf("divergent register policy was weakened: digests=%v rtmrs=%v args=%v err=%v", digests, rtmrs, args, err)
 	}
 }
 
@@ -108,8 +106,8 @@ func TestInstallPinsRejectsMixedFlags(t *testing.T) {
 	}
 }
 
-// Without the config the flat flags must behave exactly as before.
-func TestInstallPinsFlatModeUnchanged(t *testing.T) {
+// Independent digest and RTMR inputs are normalized for the chart.
+func TestInstallPinsMeasurementInputs(t *testing.T) {
 	withInstallFlags(t, "", []string{"00" + pinDigestA}, []string{"1=" + pinReg1})
 
 	digests, rtmrs, helmArgs, err := installPins()

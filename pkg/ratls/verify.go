@@ -18,13 +18,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
-// Pins is the peer-identity pin set an in-cluster RA-TLS verifier enforces:
-// launch-measurement reference values, whole-image pins, and the TDX runtime
-// measurement registers. It is [remote.Policy] under the name the c8s flag
-// plumbing uses; the zero value pins nothing (accept any attested TEE —
-// development only; callers warn).
-type Pins = remote.Policy
-
 // VerifyPolicy defines what attestation claims are acceptable.
 type VerifyPolicy struct {
 	// Policy is the evidence policy the attestation-api enforces: image pins,
@@ -268,7 +261,7 @@ func mapVerifyError(family TEEType, err error) error {
 		return ErrSignatureInvalid
 	case errors.Is(err, remote.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, remote.ErrMeasurementNotAllowed), errors.Is(err, remote.ErrRTMRNotAllowed):
+	case errors.Is(err, remote.ErrMeasurementNotAllowed), errors.Is(err, remote.ErrRTMRNotAllowed), errors.Is(err, remote.ErrAnchorNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, remote.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

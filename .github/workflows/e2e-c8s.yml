@@ -94,37 +94,14 @@ jobs:
       actions: read
     uses: ./.github/workflows/tdx-metal-e2e.yml
     with:
-      # DELIBERATELY EMPTY. Empty means "use the ref the node image was built
-      # from", published in the tdx-rke2-image-refs ConfigMap.
-      #
-      # WHY, and the earlier comment here had this WRONG. It claimed the image
-      # bakes a floor "from its build ref, so installing any other ref gets that
-      # ref's own components denied". That is not the mechanism. The measured
-      # base allowlist in the node image (confidential-os-builder
-      # mkosi/base/mkosi.profiles/c8s/image-policy.yaml.in) holds exactly TWO
-      # entries, the nri-image-policy image and the cds image. It has never
-      # contained the operator, ratls-mesh, router, get-cert or attestation-api
-      # at any ref, so "that ref's components" were never in it to be missing.
-      #
-      # THE ACTUAL BINDING IS A BOOTSTRAP ORDERING. CDS serves the allowlist that
-      # admits everything else, so CDS itself has to be admitted first, and the
-      # only thing that can admit it before it is running is that two-entry
-      # measured base allowlist, which pins ONE cds digest: the node image's. Install a
-      # different ref and its cds image is a different digest, so it is denied at
-      # container create in c8s-system, never serves a
-      # seed, and helm --wait expires. Narrow in principle, since retag-unchanged
-      # preserves the digest whenever cds itself is untouched, but measured on
-      # 2026-07-27 it was 0 of the last 3 merge heads.
-      #
-      # Note --resolve-digests does NOT help here: it derives component digests
-      # into the CDS-SERVED seed, which is downstream of the bootstrap. That is
-      # why arbitrary third-party digests (the ARC images) can be seeded at
-      # install and admitted: those pods start after CDS is already serving.
-      #
-      # CONSEQUENCE, UNCHANGED: this lane proves the stack, the host, the image
-      # and the runner, not the code in the merge that triggered it. It is also
-      # the ONLY lane in either repo that runs nri-image-policy in ENFORCE mode
-      # and asserts a real admission denial; the snp-metal lane installs the
-      # merge head but with policy.mode: audit, so it tests newer code with
-      # enforcement off. The two are complementary, not redundant.
-      c8s_ref: ''
+      # The same commit the SNP leg tests, installed on the node image built
+      # from it. Only that pair works: the node image's measured base
+      # allowlist (confidential-os-builder mkosi/base/mkosi.profiles/c8s/
+      # image-policy.yaml.in) pins ONE cds digest, its own build's, and CDS is
+      # what admits everything else, so a chart from any other commit has its
+      # CDS denied at container create and nothing converges. An empty ref
+      # would resolve to this run's checkout, main's head when the run
+      # started, which in a merge burst is a later commit than the one whose
+      # publish triggered us. This is the only lane in either repo that runs
+      # nri-image-policy fail-closed on TDX and asserts a real admission denial.
+      c8s_ref: ${{ inputs.c8s_ref }}

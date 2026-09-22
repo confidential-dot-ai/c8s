@@ -9,8 +9,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // resolveInventoryCIDRs returns the operator's --node-cidr when given.

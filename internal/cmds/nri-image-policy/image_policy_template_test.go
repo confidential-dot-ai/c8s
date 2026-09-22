@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // The node image's baked boot config is the plugin's other config schema
@@ -122,10 +124,12 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 		}
 	}
 
-	// Every base entry must be a digest the store admits under any argv.
+	// System images must remain admitted with their host mounts at final admission.
 	store := newPolicyStore(cfg.Allowlist.Base)
 	for d := range baseEntries {
-		if !store.baseAdmits(d, nil) {
+		if !store.baseAdmits(allowlist.RunningContainer{Digest: d, Mounts: []allowlist.ObservedMount{
+			{Destination: "/host", Class: allowlist.MountHost, Storage: allowlist.MountUnknown},
+		}}, launchFinal) {
 			t.Errorf("base entry %q is not admitted by digest alone", d)
 		}
 	}

@@ -47,7 +47,11 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 // an inventory of what was admitted in the sandbox, and the injected images are
 // admitted under any argv, so CDS drops them from workload matching itself.
 // argv is the effective OCI process.args the container runs.
-func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string, env *allowlist.EnvObservation) {
+func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string, env *allowlist.EnvObservation, mounts ...allowlist.ObservedMount) {
+	b.recordObserved(containerID, sandboxID, name, digest, argv, env, mounts)
+}
+
+func (b *admissionInventory) recordObserved(containerID, sandboxID, name, digest string, argv []string, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) {
 	if containerID == "" || sandboxID == "" {
 		return
 	}
@@ -56,7 +60,7 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	b.containers[containerID] = ctrRec{sandboxID: sandboxID, name: name, digest: digest, argv: argv}
 
 	rec := b.admitted[sandboxID]
-	rec.Record(containerID, digest, argv, env)
+	rec.Record(containerID, digest, argv, env, mounts...)
 	b.admitted[sandboxID] = rec
 
 	// A container implies its sandbox, so a record arriving before (or without)

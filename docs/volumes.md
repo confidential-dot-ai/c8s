@@ -8,6 +8,10 @@ This complements [`secrets.md`](secrets.md) — a volume key *is* a secret, stor
 and released by exactly the machinery described there. What is new is the
 artifact the key opens, and the fact that it persists.
 
+For plain unencrypted PVCs, the node image's default `local-path`
+StorageClass provisions dynamically — see
+[cluster storage](../node-guest-image/README.md#cluster-storage).
+
 ## Why a volume is different from a secret
 
 Every other value c8s protects is RAM-resident and dies with the pod. A volume
@@ -320,6 +324,23 @@ host-written. `create` prints an exact-path grant for this reason.
 
 `read` only. Writability is a property of the volume, not the grant: a write
 grant says nothing about whether a workload may see the plaintext.
+
+## The mount policy
+
+Every container in the entry also needs a `mounts` policy admitting what the
+webhook injects, exactly as in
+[`secrets.md`](secrets.md#the-mount-policy) — for a volume consumer that is the
+cert volume plus each opened volume at `<volume-dir>/<NAME>`:
+
+```json
+"mounts": {"policy": "any"}
+```
+
+An opened volume classes as a `data` mount, whose `exact` rules sit below
+`/mnt/c8s-data/`, so pinning one means putting the volume dir there with
+`confidential.ai/c8s-volume-dir`. Its rule,
+`{"destination": "/mnt/c8s-data/<NAME>", "kind": "data"}`, joins the cert
+volume's in the same `exact` policy.
 
 ## Consuming a volume
 

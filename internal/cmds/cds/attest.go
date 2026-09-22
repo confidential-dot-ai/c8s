@@ -58,9 +58,8 @@ type AttestHandler struct {
 	// its launch digest). Empty = no RTMR pinning.
 	RTMRs map[int][]byte
 
-	// ImagePins pins whole images. When set it replaces Measurements and RTMRs,
-	// so a digest from one image cannot be paired with another's registers.
-	ImagePins []remote.ImagePin
+	// Images binds each node image to an authorized launch key.
+	Images []remote.ImagePin
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
@@ -205,10 +204,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// measurement is admitted, so the digest a leaf was issued against is the
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-	if len(h.ImagePins) > 0 {
-		if err := remote.EnforceImages(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
-			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
-			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+	if len(h.Images) > 0 {
+		if err := remote.EnforceImages(verifyResp, h.Images, req.Evidence.Platform); err != nil {
+			slog.Warn("node identity does not match policy", "error", err, "remote_addr", r.RemoteAddr)
+			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "node identity not allowed")
 			return
 		}
 	} else {
@@ -515,7 +514,7 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 		if err != nil {
 			return unnamed(slog.LevelError, "inventory reported a malformed container digest", "error", err)
 		}
-		canonical = append(canonical, workloadclaims.SandboxContainer{Digest: digest.String(), Argv: c.Argv, Env: c.Env})
+		canonical = append(canonical, workloadclaims.SandboxContainer{Digest: digest.String(), Argv: c.Argv, Env: c.Env, Mounts: c.Mounts})
 		containerSet[digest.String()] = struct{}{}
 	}
 	// The two views describe the same sandbox and must agree. The inventory is

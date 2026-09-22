@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -18,18 +19,20 @@ import (
 
 func newLintCmd(o *options) *cobra.Command {
 	var online, strict bool
-	var cvmMode string
 	cmd := &cobra.Command{
 		Use:   "lint <file|->",
 		Short: "Validate an allowlist file and report semantic warnings",
 		Long: `Parse and validate an allowlist file (or stdin with '-') and report semantic
 findings: entries with no containers, a container that can never start, digests
 whose effective policy is unconstrained, tag-form image labels (TOCTOU),
-root-subtree path grants, and mount/env policy on a deployment whose enforcer
-cannot observe those fields. --online additionally checks each digest exists in
+root-subtree path grants, and pinned search paths that overlap data mounts.
+--online additionally checks each digest exists in
 its registry via crane.
 
-Two entries declaring the same containers with the same argv policy are an
+The file is either a full or partial allowlist document or a name-keyed map of
+entries, the shapes 'apply' accepts and 'derive' emits.
+
+Two entries declaring the same containers with the same launch policies are an
 error: release requires exactly one entry to match, so both are refused
 forever. Errors exit non-zero on their own; --strict makes warnings do the
 same.`,
@@ -39,12 +42,12 @@ same.`,
 			if err != nil {
 				return err
 			}
-			al, err := pkgallowlist.ParseJSON(data)
+			entries, err := parseWorkloadEntries(data)
 			if err != nil {
 				return err
 			}
+			al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries}
 			findings := lintOffline(al)
-			findings = append(findings, unobservedFieldPolicies(al, cvmMode)...)
 			if online {
 				if err := crane.Require(); err != nil {
 					return err
@@ -70,7 +73,8 @@ same.`,
 	}
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
-	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode the allowlist targets (pod, node, gke, aks); pod silences the mount/env scope warning")
+	cmd.Flags().String("cvm-mode", "", "deprecated; has no effect")
+	_ = cmd.Flags().MarkDeprecated("cvm-mode", "mount and environment policies are enforced by NRI; this flag has no effect")
 	return cmd
 }
 
@@ -149,12 +153,12 @@ func countErrors(findings []finding) int {
 }
 
 // lintOffline reports semantic findings for an allowlist without any registry or
-// CDS access. The document is assumed already parsed/validated by ParseJSON.
+// CDS access. Its entries are assumed already parsed and validated.
 func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
 
-	// digest -> set of distinct entry names; and whether some occurrence is
-	// fully unconstrained (both argv segments any).
+	// digest -> set of distinct entry names; and whether some occurrence admits
+	// an unconstrained launch.
 	entriesByDigest := map[string]map[string]bool{}
 	fullyAny := map[string]bool{}
 
@@ -204,6 +208,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 
 	warnings = append(warnings, indistinguishableEntries(al)...)
 	warnings = append(warnings, shadowedEntries(al)...)
+	warnings = append(warnings, searchPathFindings(al)...)
 	return warnings
 }
 
@@ -271,25 +276,40 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 	return true
 }
 
-// unobservedFieldPolicies reports mount restrictions outside pod mode.
-func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
-	if cvmMode == "pod" {
-		return nil
-	}
-	var warnings []finding
+// searchPathFindings rejects pinned loader and interpreter search paths that
+// overlap operator-supplied data, which could otherwise be loaded as code.
+func searchPathFindings(al *pkgallowlist.Allowlist) []finding {
+	var out []finding
 	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		for _, c := range allContainers(al.Workloads[name]) {
-			var fields []string
-			if c.Mounts.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "mounts")
-			}
-			if fields == nil {
+			if c.Env.Policy != pkgallowlist.PolicyExact || c.Mounts.Policy != pkgallowlist.PolicyExact {
 				continue
 			}
-			warnings = append(warnings, warnf("workload %q container %s constrains %s; only the in-guest policy-monitor observes those fields, so on a deployment enforced by the host NRI plugin this policy admits every container (pass --cvm-mode=pod if this allowlist targets kata)", name, c.Digest.String(), strings.Join(fields, " and ")))
+			for _, variable := range []string{"PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "NODE_PATH"} {
+				value, set := c.Env.Values[variable]
+				if !set {
+					continue
+				}
+				for _, rule := range c.Mounts.Rules {
+					if rule.Kind == pkgallowlist.MountData && searchPathReachesMount(value, rule.Destination) {
+						out = append(out, errorf("workload %q container %s pins %s to a search path overlapping data mount %q; operator-supplied content could be loaded as code", name, c.Digest.String(), variable, rule.Destination))
+					}
+				}
+			}
 		}
 	}
-	return warnings
+	return out
+}
+
+func searchPathReachesMount(value, destination string) bool {
+	destination = path.Clean(destination)
+	for _, element := range strings.Split(value, ":") {
+		element = path.Clean(element)
+		if element == destination || strings.HasPrefix(element, strings.TrimSuffix(destination, "/")+"/") || strings.HasPrefix(destination, strings.TrimSuffix(element, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // indistinguishableEntries reports entries that no running set can tell apart.
@@ -334,20 +354,21 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 
 func ambiguousGroupFinding(names []string) finding {
 	return errorf(
-		"workloads [%s] declare the same containers with the same command, args and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
+		"workloads [%s] declare the same containers with the same command, args, mounts and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
 		strings.Join(names, ", "))
 }
 
 // entryShape is the part of an entry a release decision reads: the digests and
-// argv policies of each container list. Image labels and the secret grant are
+// launch policies of each container list. Image labels and the secret grant are
 // excluded — two entries differing only in those are exactly the dangerous
 // case, since the grant an operator intended is the thing that never resolves.
 func entryShape(w pkgallowlist.Workload) (string, error) {
 	type containerShape struct {
-		Digest  string                  `json:"digest"`
-		Command pkgallowlist.ArgvPolicy `json:"command"`
-		Args    pkgallowlist.ArgvPolicy `json:"args"`
-		Env     pkgallowlist.EnvPolicy  `json:"env"`
+		Digest  string                   `json:"digest"`
+		Command pkgallowlist.ArgvPolicy  `json:"command"`
+		Args    pkgallowlist.ArgvPolicy  `json:"args"`
+		Env     pkgallowlist.EnvPolicy   `json:"env"`
+		Mounts  pkgallowlist.MountPolicy `json:"mounts"`
 	}
 	shape := func(cs []pkgallowlist.Container) ([]string, error) {
 		out := make([]string, 0, len(cs))
@@ -356,7 +377,11 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 			if env.Policy == "" {
 				env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyAny}
 			}
-			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env})
+			mounts := c.Mounts
+			if mounts.Policy == "" {
+				mounts = pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}
+			}
+			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env, Mounts: mounts})
 			if err != nil {
 				return nil, err
 			}

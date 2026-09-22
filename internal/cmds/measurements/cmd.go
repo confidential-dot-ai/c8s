@@ -5,8 +5,9 @@ package measurements
 import (
 	"fmt"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/spf13/cobra"
+
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 // NewCmd returns the `c8s measurements` command group.

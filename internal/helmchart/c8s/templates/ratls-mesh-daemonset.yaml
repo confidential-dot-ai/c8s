@@ -278,7 +278,7 @@ spec:
             - {{ .Values.ratlsMesh.rotationTimeout | quote }}
             {{- end }}
             {{- if .Values.ratlsMesh.measurementsConfig }}
-            - --measurements-config
+            - --image-policy-file
             - /etc/c8s-measurements/ratls-mesh.json
             {{- else }}
             {{- if .Values.ratlsMesh.measurements }}

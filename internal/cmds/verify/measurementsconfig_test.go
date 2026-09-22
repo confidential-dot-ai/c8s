@@ -134,7 +134,7 @@ func TestCheckServedMeasurementsReportsPlatformMismatch(t *testing.T) {
 // refuse a server whose certificate is not the one that was attested — that
 // binding is what stops a substituted endpoint answering for CDS.
 func TestFetchServedMeasurementsBindsToTheAttestedCert(t *testing.T) {
-	doc, err := refvalues.Render(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
+	doc, err := refvalues.Format(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

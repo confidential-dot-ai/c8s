@@ -2,13 +2,12 @@ package cds
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-
-	"strings"
-
 	"github.com/spf13/cobra"
+
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // TestNewCmdDurationFlagDefaults pins the shipped default for every duration

@@ -322,7 +322,7 @@ spec:
             - --cds-url={{ include "c8s.cdsURL" . }}
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             {{- if .Values.cds.measurementsConfig }}
-            - --measurements-config=/etc/c8s-measurements/cds.json
+            - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements={{ join "," . }}

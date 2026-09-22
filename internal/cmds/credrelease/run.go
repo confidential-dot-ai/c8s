@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"golang.org/x/net/netutil"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -32,8 +32,9 @@ func newServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Serv
 		Handler:           handler,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
-		// A slow reader or parked keep-alive must not hold a goroutine open.
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		// Allow the bounded body read, attestation, and response write.
+		WriteTimeout: attestTimeout + 20*time.Second,
 		IdleTimeout:  30 * time.Second,
 		// Go's 1MiB default lets one unauthenticated request buy far more
 		// memory than any real CSR needs.
@@ -46,9 +47,9 @@ type Config struct {
 	// ListenAddr is the HTTPS bind address (e.g. ":8443").
 	ListenAddr string
 	// AttestationAPIURL is the local attestation-api base URL (the same
-	// :8400 service the rest of the stack uses). It provides the RA-TLS
-	// serving cert's quote and, on SNP, the verified self-report that
-	// anchors the operator key to the launch-committed HOSTDATA.
+	// loopback service the rest of the stack uses). It provides the RA-TLS
+	// serving quote, fresh bootstrap evidence, and the verified self-report
+	// that anchors the operator key to the launch binding.
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "snp"; no default).
 	Platform string
@@ -70,7 +71,7 @@ type Config struct {
 }
 
 // Run loads the measured operator key and cluster CA, then serves the
-// RA-TLS-protected /release-credential endpoint. It blocks until ctx is done.
+// RA-TLS-protected bootstrap and credential endpoints. It blocks until ctx is done.
 //
 // Startup order matters for the trust story:
 //  1. LoadMeasuredOperatorKey — read the opkeydata pubkey and CONFIRM it
@@ -107,6 +108,8 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("build handler: %w", err)
 	}
+	attestationClient := attestclient.NewClient("")
+	handler.attester = localEvidenceGenerator{client: attestationClient, apiURL: cfg.AttestationAPIURL}
 
 	// RA-TLS serving config: the presented cert embeds a fresh TDX quote
 	// bound to its own public key, so the operator's RA-TLS client verifies
@@ -114,7 +117,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// CSR or trusting the returned cert. AttestFunc fetches the quote from the
 	// local attestation-api (platform-generic despite the SNP name — it reads
 	// resp.Platform, so it yields a TDX quote here); same pattern as cds.
-	attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationAPIURL)
+	attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestationClient, cfg.AttestationAPIURL)
 	tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:   cfg.Platform,
 		AttestFunc: attestFunc,

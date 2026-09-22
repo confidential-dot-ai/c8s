@@ -17,7 +17,7 @@ func TestTDXExactBuildUsesVerifiedSource(t *testing.T) {
 	readYAML(t, "../../.github/actions/tdx-metal-e2e/action.yml", &action)
 	var build workflowStep
 	for _, step := range action.Runs.Steps {
-		if step.Name == "build the c8s CLI at the paired ref" {
+		if step.Name == "build the c8s CLI under test" {
 			build = step
 		}
 	}
@@ -158,10 +158,10 @@ printf 'run %s\n' "$(cat "$TDX_TEST_BINARY_SOURCE")" >> "$TDX_TEST_COMMANDS"
 			if commands != want {
 				t.Fatalf("CLI was not built and run from verified source: got %q want %q", commands, want)
 			}
-			if exported != "C8S_SOURCE_DIR="+workspace+"\n" {
+			if exported != "C8S_SOURCE_DIR="+workspace+"\nC8S_SHA="+trusted+"\nc8sRef="+trusted[:7]+"\n" {
 				t.Fatalf("wrong source passed to later steps: %q", exported)
 			}
-			env = append(env, strings.TrimSpace(exported))
+			env = append(env, strings.Split(strings.TrimSpace(exported), "\n")...)
 			var ran []string
 			for _, step := range action.Runs.Steps {
 				switch step.Name {

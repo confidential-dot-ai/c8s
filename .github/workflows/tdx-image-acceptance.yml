@@ -17,7 +17,6 @@ concurrency:
   cancel-in-progress: false
 env:
   NS: confai-images
-  REFS_CM: tdx-rke2-image-refs
   VM: c8s-tdx-${{ github.run_id }}-${{ github.run_attempt }}
 jobs:
   source:

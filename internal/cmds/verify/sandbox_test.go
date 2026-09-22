@@ -249,6 +249,17 @@ func TestApplySandboxPolicyVerifiedAgainstMeshCA(t *testing.T) {
 	if !strings.Contains(oc.SandboxIDNote, "verified: the leaf chains") {
 		t.Fatalf("note = %q, want it to record the chain check", oc.SandboxIDNote)
 	}
+	if !strings.Contains(oc.SandboxIDNote, "--sandbox-id") {
+		t.Fatalf("note = %q, want it to record that the pin was exercised", oc.SandboxIDNote)
+	}
+
+	// The same leaf without the pin reports only the chain check, so the two
+	// runs cannot be confused for one another.
+	unpinned := Outcome{Verified: true}
+	applySandboxPolicy(&unpinned, config{meshCA: caPath}, ev, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
+	if strings.Contains(unpinned.SandboxIDNote, "--sandbox-id") {
+		t.Fatalf("note = %q, want no pin claim when --sandbox-id was not supplied", unpinned.SandboxIDNote)
+	}
 
 	// A different expected ID on the same chain-valid leaf must still fail.
 	mismatch := Outcome{Verified: true}
@@ -310,14 +321,15 @@ func TestApplySandboxPolicyOperatorKeys(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
-		report operatorKeysReport
-		want   bool
+		name     string
+		report   operatorKeysReport
+		want     bool
+		wantNote string
 	}{
-		{"served set matches", operatorKeysReport{digest: expected}, true},
-		{"served set differs", operatorKeysReport{digest: []byte("different")}, false},
-		{"fetch failed", operatorKeysReport{fetchErr: errSandboxTest}, false},
-		{"never fetched", operatorKeysReport{note: "kind is not cds"}, false},
+		{"served set matches", operatorKeysReport{digest: expected}, true, "matched: the set served over the attested cert equals --operator-keys"},
+		{"served set differs", operatorKeysReport{digest: []byte("different")}, false, ""},
+		{"fetch failed", operatorKeysReport{fetchErr: errSandboxTest}, false, ""},
+		{"never fetched", operatorKeysReport{note: "kind is not cds"}, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oc := Outcome{Verified: true}
@@ -325,7 +337,64 @@ func TestApplySandboxPolicyOperatorKeys(t *testing.T) {
 			if oc.Verified != tc.want {
 				t.Fatalf("Verified = %v, want %v (error: %s)", oc.Verified, tc.want, oc.Error)
 			}
+			if oc.OperatorKeysNote != tc.wantNote {
+				t.Fatalf("OperatorKeysNote = %q, want %q", oc.OperatorKeysNote, tc.wantNote)
+			}
 		})
+	}
+
+	// A gather that never reached the endpoint carries no note of its own on a
+	// --from-file target; the failure must still name a cause.
+	t.Run("never fetched with no gather note", func(t *testing.T) {
+		oc := Outcome{Verified: true}
+		applySandboxPolicy(&oc, config{operatorKeys: keysPath}, &evidence{}, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
+		if oc.Verified || strings.HasSuffix(oc.Error, ": ") {
+			t.Fatalf("Error = %q, want a failure naming why the check could not run", oc.Error)
+		}
+	})
+}
+
+// The operator-keys section is otherwise byte-identical whether or not
+// --operator-keys was supplied, so a mistyped flag name leaves a run that
+// compared nothing looking exactly like one that compared and matched.
+func TestApplySandboxPolicyOperatorKeysVerdictDistinguishesPinning(t *testing.T) {
+	pubPEM, fp := operatorPubPEM(t)
+	keysPath := filepath.Join(t.TempDir(), "op.pub")
+	if err := os.WriteFile(keysPath, pubPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	served, err := expectedOperatorKeysDigest(config{operatorKeys: keysPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := operatorKeysReport{fingerprints: []string{fp}, digest: served}
+
+	pinned := Outcome{Verified: true}
+	applySandboxPolicy(&pinned, config{operatorKeys: keysPath}, &evidence{}, report, &verifyPlan{}, measurementsReport{})
+	unpinned := Outcome{Verified: true}
+	applySandboxPolicy(&unpinned, config{}, &evidence{}, report, &verifyPlan{}, measurementsReport{})
+
+	if !pinned.Verified || !unpinned.Verified {
+		t.Fatalf("both runs should pass: pinned error %q, unpinned error %q", pinned.Error, unpinned.Error)
+	}
+	if pinned.OperatorKeysNote == unpinned.OperatorKeysNote {
+		t.Fatalf("pinned and unpinned runs report identically: %q", pinned.OperatorKeysNote)
+	}
+	if !strings.Contains(pinned.OperatorKeysNote, "matched") {
+		t.Errorf("pinned note = %q, want it to state the comparison passed", pinned.OperatorKeysNote)
+	}
+	if !strings.Contains(unpinned.OperatorKeysNote, "not pinned") || strings.Contains(unpinned.OperatorKeysNote, "matched") {
+		t.Errorf("unpinned note = %q, want it to say the set was compared against nothing", unpinned.OperatorKeysNote)
+	}
+}
+
+// Without keys to list there is nothing for an unpinned run to qualify: the
+// gather's own note (a 404, a skipped kind) already says why the set is absent.
+func TestApplySandboxPolicyOperatorKeysUnpinnedNeedsKeys(t *testing.T) {
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{}, &evidence{}, operatorKeysReport{digest: []byte("empty-set")}, &verifyPlan{}, measurementsReport{})
+	if oc.OperatorKeysNote != "" {
+		t.Fatalf("OperatorKeysNote = %q, want no verdict when no keys were listed", oc.OperatorKeysNote)
 	}
 }
 

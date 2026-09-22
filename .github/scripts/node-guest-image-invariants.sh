@@ -257,6 +257,15 @@ if grep -qF '/usr/lib/confai/state.d' "$init"; then
       exit 1
     fi
   done
+  # The NRI storage inspector classifies a state.d overlay from this boot's
+  # scratch mapping, which holds only while one scratch-backed /state supplies
+  # every overlay's upper layer.
+  for pin in 'mount_state_backing /state' 'upperdir=/state/$2/upper'; do
+    if ! grep -qF "$pin" "$init"; then
+      echo "::error::confos initrd changed how state overlays are backed (missing: $pin); internal/cmds/nri-image-policy/mount_storage_linux.go reads that contract — update both together"
+      exit 1
+    fi
+  done
 elif [ "${EXPECT_IMMUTABLE_ROOT:-1}" = 1 ]; then
   echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
   exit 1

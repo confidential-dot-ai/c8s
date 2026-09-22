@@ -279,7 +279,7 @@ cds:
   ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
   ## Measurements config: the JSON document listing the VM images this cluster
   ## runs, each pinned as a whole image. Content, not a path — set it with
-  ## `c8s install --measurements-config <file>` or `helm --set-file`. Empty
+  ## `c8s install --image-policy-file <file>` or `helm --set-file`. Empty
   ## disables whole-image matching; `measurements` above still pins.
   measurementsConfig: ""
   operatorKeys: ""
@@ -731,9 +731,11 @@ nriImagePolicy:
     restartCommand: ""
 
   refresh:
-    # How often the worker plugin pulls the current allowlist from CDS. This
-    # bounds how long a freshly applied workload entry is still refused at
-    # container start.
+    # How often the worker plugin pulls the current allowlist from CDS. A
+    # written entry keeps its previous admission verdict at container start —
+    # an added entry refused, a narrowed one still admitted — for up to one
+    # interval after CDS commits the write. Under `baked` the plugin runs the
+    # equal value measured into the node image, which an override cannot reach.
     interval: 5s
 
   # --- Bootstrap allowlist ---
@@ -1182,11 +1184,8 @@ router:
   nginx:
     image:
       repository: nginxinc/nginx-unprivileged
-      # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
-      # core modules router uses; the full/perl variants ship image-filter,
-      # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
-      # Accepted CVEs against this pin live in .grype.yaml.
-      digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+      # Resolve nginxinc/nginx-unprivileged:1.30.5-alpine-slim to bump this digest.
+      digest: "sha256:c2c3905bda3dc8de80023e19bed0a45745279d26e5586cdee64370c8f9b12348"
       tag: ""
       pullPolicy: IfNotPresent
     # -- Number of nginx replicas.

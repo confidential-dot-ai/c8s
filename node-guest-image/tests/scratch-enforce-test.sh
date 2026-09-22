@@ -29,8 +29,9 @@ set_dm() { # set_dm NAME... — one 80Gi dm-N per name; none = tmpfs fallback bo
         printf '253:%s' "$i" > "$WORK/sys/block/dm-$i/dev"
         printf 'CRYPT-PLAIN-%s' "$name" > "$WORK/sys/block/dm-$i/dm/uuid"
         if [[ "$name" == scratch ]]; then
+            # virtio-blk exposes the serial on the block device.
             mkdir -p "$WORK/sys/block/vdb/device" "$WORK/sys/block/dm-$i/slaves"
-            printf 'confai-scratch' > "$WORK/sys/block/vdb/device/serial"
+            printf 'confai-scratch' > "$WORK/sys/block/vdb/serial"
             ln -s "$WORK/sys/block/vdb" "$WORK/sys/block/dm-$i/slaves/vdb"
         fi
         i=$((i + 1))
@@ -75,7 +76,20 @@ ok "fails closed" not run_enforce
 
 CASE="scratch has wrong backing serial"
 set_dm scratch
-printf 'host-lookalike' > "$WORK/sys/block/vdb/device/serial"
+printf 'confai-scratch' > "$WORK/sys/block/vdb/device/serial"
+printf 'host-lookalike' > "$WORK/sys/block/vdb/serial"
+ok "fails closed" not run_enforce
+
+CASE="scratch has only a parent device serial"
+set_dm scratch
+printf 'confai-scratch' > "$WORK/sys/block/vdb/device/serial"
+rm "$WORK/sys/block/vdb/serial"
+ok "fails closed" not run_enforce
+
+CASE="scratch has an empty block device serial"
+set_dm scratch
+printf 'confai-scratch' > "$WORK/sys/block/vdb/device/serial"
+: > "$WORK/sys/block/vdb/serial"
 ok "fails closed" not run_enforce
 
 summarize "scratch-enforce"

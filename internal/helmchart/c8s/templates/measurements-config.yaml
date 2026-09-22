@@ -13,7 +13,7 @@ against.
 {{- range $name, $doc := dict "cds.measurementsConfig" $cds "ratlsMesh.measurementsConfig" $mesh }}
 {{- if $doc }}
 {{- if not (hasPrefix "{" (trim $doc)) }}
-{{- fail (printf "%s must be the JSON content of the measurements config, not a file path — use `c8s install --measurements-config <file>`, `c8s render-values --measurements-config <file>`, or helm --set-file %s=<file>" $name $name) }}
+{{- fail (printf "%s must be the JSON content of the measurements config, not a file path — use `c8s install --image-policy-file <file>`, `c8s render-values --image-policy-file <file>`, or helm --set-file %s=<file>" $name $name) }}
 {{- end }}
 {{- end }}
 {{- end }}

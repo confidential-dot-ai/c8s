@@ -7,12 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // buildInventoryHosts resolves the sandbox-digests dial bound: the operator's

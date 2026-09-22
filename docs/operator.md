@@ -83,6 +83,137 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
+### Authenticated launch configuration
+
+This layer adds the signed-launch CLI and schema. The next layer wires them
+into guest boot and baked services; existing guest role selection is unchanged
+here. The complete stack, including the hardware launchers in #552, must land
+together before publishing and deploying the new image contract. The boot
+requirements below describe that completed integration.
+
+A measured node uses one image for both `server` and `agent`. Each boot
+requires an ISO labelled `opkeydata` containing exactly the launch inputs
+`pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
+with the operator. `pubkey` is bound to the guest by the platform: the measured
+initrd extends TDX RTMR[3], while an SNP launcher must set HOST_DATA to
+`SHA-256(pubkey)` over the exact PEM file bytes.
+
+The strict `c8s-launch/v1` document selects the role, cluster identity, node
+addresses, RKE2 join credentials, trusted role keys, image pins and TLS SAN.
+It accepts an optional `workloads` string containing a complete
+`c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
+service arguments or component toggles; volume support remains disabled.
+
+Use **distinct launch keys for server and agent roles, and new keys for
+each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
+launch keys establish cluster separation during peer verification. Keep one
+server key and one or more agent keys. An agent document must omit
+`rke2.serverToken` entirely, including an empty field; it receives only the
+agent token. Server and agent tokens must differ and contain 64 lowercase
+hexadecimal characters each.
+
+`c8s node launch-config new` creates everything one cluster needs: a server
+launch key, an agent launch key, fresh join tokens, a signed `launch.yaml`
+per node and the client policy that pins the server. Give it the trusted
+`manifest.json` published with the exact node image, the server's guest IPv4
+address that every node can reach, and the agent names. On SNP, also pass
+the VM's vCPU count, which selects the launch digest.
+
+```sh
+c8s node launch-config new --out demo --cluster-id demo \
+  --image-manifest manifest.json \
+  --server-address 10.0.0.10 \
+  --agent demo-agent-1 --agent demo-agent-2
+# SNP: add --vcpus 8 (the VM shape's launch digest); TDX has one per image.
+
+xorriso -as mkisofs -V opkeydata -o demo/server.iso demo/server
+xorriso -as mkisofs -V opkeydata -o demo/demo-agent-1.iso demo/demo-agent-1
+```
+
+`c8s launch-config` remains available as a compatibility command for existing
+launch scripts; both paths use the same implementation.
+
+The bundle directory is created new and never reused:
+
+| Path | Purpose |
+|---|---|
+| `demo/server.key` | server launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
+| `demo/agent.key` | the agent launch key every agent boots with |
+| `demo/server.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
+| `demo/server/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the server's opkeydata |
+| `demo/<agent>/` | the same three files for each agent |
+
+An agent can be added to a running cluster without touching the server:
+`c8s node launch-config add-agent --bundle demo --name demo-agent-3` derives
+its document from the server's (same cluster, image, agent token and keys,
+never the server token) and signs it with the agent key. A server created
+without `--server-address` autodetects its own; `add-agent` then needs
+`--server-address`.
+
+The generated document uses the strict schema described here; edit it only
+when a field the command does not expose is needed, then re-sign with
+`c8s keys sign-launch --key demo/server.key --force demo/server/launch.yaml`.
+
+Attach the corresponding ISO to each VM along with its required scratch
+disk, booting the **same image and supported VM shape** for both roles.
+The image is built separately for TDX and SNP; their image digests and
+measurements are different. SNP's launch digest also depends on vCPU count.
+Every `image.measurement` is 96 lowercase hexadecimal characters. TDX
+requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
+pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
+RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
+
+For a server, `server.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. An agent must
+always carry its server's reachable IPv4 address. `node.ip` is optional
+(`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
+IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
+to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
+serves a CDS-issued certificate; arbitrary routes, public WebPKI configuration
+and CORS overrides are not launch settings in this image.
+
+For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
+
+```sh
+kubectl -n YOUR_NAMESPACE create secret generic demo-server-launch \
+  --from-file=pubkey=demo/server/pubkey \
+  --from-file=launch.yaml=demo/server/launch.yaml \
+  --from-file=launch.yaml.sig=demo/server/launch.yaml.sig
+```
+
+Reference that Secret in the VM's volume with
+`secret: {secretName: demo-server-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the agent's files and a separate
+Secret. On SNP, the launcher must additionally commit the corresponding
+public-key hash as HOST_DATA; attaching the disk alone is insufficient.
+
+`c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
+and writes an ASN.1 DER signature encoded as one base64 line to
+`<file>.sig`. It does not overwrite an existing signature unless `--force`
+is passed. Any later edit requires a new signature. `c8s launch-config stage`
+authenticates those bytes before parsing, checks the complete software
+measurement and role-key relationship against verified self-attestation, then
+publishes the role marker last. Integration with `rke2-role.service` follows
+in the baked-node layer; the command alone does not change the existing boot
+sequence. In that integration, changing role or launch configuration requires
+a relaunch with a newly signed bundle and the corresponding role's
+hardware-bound public key.
+
+The verified files live in root-only `/run/confos/launch`. `peers.json`
+contains the software/key tuples for this cluster's server and permitted
+agents; `cds.json` contains only its server. Their shared measurement-file
+schema carries `approver_key` as the exact PEM string alongside each entry's
+image measurement and TDX RTMR tuple. This lets peers accept both roles while
+CDS clients require the authorized server despite identical software images.
+The schema belongs to attestation-go's `refvalues` package: `approver_key`
+maps to `remote.ImagePin.Anchor`. `remote.EnforceImages` checks the image and
+calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
+borrow another entry's authorized key. c8s passes these complete pins through
+`remote.Policy.Images`; legacy flags that cannot carry anchors are refused
+where they would weaken enforcement.
+
+### Chart-managed defaults
+
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
 - CDS verifies evidence and signs workload CSRs in one process.
@@ -457,12 +588,54 @@ Caveats the output surfaces:
 - **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
   certificate key, not a per-request nonce, so it proves "this key was born in a
   TEE with this measurement" but not "freshly now" (`fresh: false`).
+
+### Complete measured identity policies
+
+Image policy files preserve each image measurement, its TDX RTMR tuple and
+optional `approver_key` as one policy entry. The key is the exact PEM string;
+attestation-go's `refvalues` package maps it to `remote.ImagePin.Anchor`.
+`remote.EnforceImages` checks the image and calls `runtimemeasure.VerifyBinding`
+for that same entry. An image cannot borrow another entry's authorized key.
+c8s passes these entries through `remote.Policy.Images` to its attestation
+clients and injected workload helpers. Each verifier enforces the complete
+entry, including its launch-key binding when present.
+
+### Image policy inputs
+
+A complete image policy is a JSON document containing each trusted image's
+launch digest, TDX registers where applicable, and optional launch-key anchor.
+File and inline inputs use the same JSON format:
+
+| Input | Contents |
+|---|---|
+| `--image-policy-file policy.json` | Path to a complete JSON image policy. |
+| `--image-policy-json '{...}'` | The JSON document itself; supported by workload helpers such as `get-cert` and `get-secret`. |
+| `--measurements-file digests.txt` | Text file containing one launch digest per line; no per-image register or key bindings. Supported by `verify`, `allowlist`, and `secrets`. |
+
+Choose one complete policy source. A complete policy cannot be combined with
+independent digest or register inputs such as `--measurements`,
+`--measurements-file`, or `--rtmrs` (including the `--cds-` variants where
+provided). These independent inputs remain available for policies expressed as
+a digest list and a shared register set. Mesh peers and CDS can use separate
+files; `--cds-image-policy-file` selects the CDS-only policy for `ratls-mesh`.
+
+`c8s install` and `c8s render-values` accept image policies only when every
+image has identical RTMR pins and no `approver_key`. The Helm NRI installer
+configures CDS trust through a digest list and one shared register set, so
+these commands reject policies whose per-image register or launch-key
+constraints would be lost. Direct Helm installs with `cds.measurementsConfig`
+must also supply equivalent `cds.measurements` and `cds.rtmrs`; the chart
+rejects missing or mismatched pins while its NRI installer is enabled.
+Operator-key-bound policies require the baked node launch flow, which manages
+NRI separately with `nriImagePolicy.enabled=false`. CDS, mesh, and workload
+helpers that receive a complete image policy enforce its per-image tuples
+directly.
+
 ### Trust gate: `c8s get-kubeconfig`
 
 `c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
-and it enforces the identical policy twice — on the initial attestation gate
-and again on the RA-TLS credential-release connection:
+both on the RA-TLS connection and on a fresh nonce-bound attestation report:
 
 - **platform** — the `--image-manifest` shape selects it (a TDX tuple or SNP
   `snp_variants`); a node of any other platform is refused up front;
@@ -484,6 +657,30 @@ and again on the RA-TLS credential-release connection:
   none) and, being self-signed, verify its own signature with its attested
   key.
 
+By default the client sends a signed, 32-byte nonce to `POST /attest` on the
+credential-release service at port **8443**. That service authenticates the
+operator token before asking its configured local attester for evidence.
+The client verifies the returned report in-process before generating the
+credential CSR. The fresh report is still required: the TLS certificate's
+key-bound quote may have been created before later workload measurements.
+The raw attester can remain on guest loopback; external bootstrap only needs
+the credential service and the Kubernetes API on port **6443**.
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key "$OPERATOR_KEY" --image-manifest manifest.json \
+  --out kubeconfig --release-wait 5m
+```
+
+For SSH tunnels or non-default ports, supply `--release-url` and
+`--apiserver-url` instead of `--node`. Release URLs must use HTTPS, and
+signed requests never follow redirects. `--release-wait` retries refused
+connections while the service starts; attestation and authorization failures
+stop the flow. An explicit `--attest-url` retains the separate nonce check
+for older images with a reachable attestation API. There is no automatic
+fallback: images without the authenticated `/attest` endpoint need a rebuild
+to use the default flow.
+
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
 node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
@@ -502,7 +699,7 @@ is only meaningful where such a binding exists: on a cluster that is not the
 c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
 for a group that cluster already authorizes.
 
-Do not read the binding as a privilege boundary. On this single-node cluster
+Do not read the binding as a privilege boundary. In this node cluster
 `cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
 PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
 `kubectl` away. RBAC is used for revocability and policy, not containment; the

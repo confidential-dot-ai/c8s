@@ -111,7 +111,8 @@ jobs:
     # fork PRs, whose changes job is skipped); otherwise enforce every build
     # and comparison selected by the classifier.
     needs: [changes, build-a, build-b]
-    if: always()
+    # Superseded runs must not leave a failed comparison behind.
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - name: Change classification must have succeeded

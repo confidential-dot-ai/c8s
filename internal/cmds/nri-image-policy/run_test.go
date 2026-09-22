@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/audit"
-	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+
+	"github.com/confidential-dot-ai/c8s/internal/audit"
+	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 )
 
 // bindDeadResolver points the plugin at a real *ctrdresolver.Resolver on a socket
@@ -125,7 +127,13 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	// failure path is exercised without a multi-second wait.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	verdict, reason := p.checkImage(ctx, p.cfg, "default", "pod", "ctr", "registry/repo:latest", nil)
+	verdict, reason := p.checkImagePhase(ctx, p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo:latest",
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny when digest resolution fails, got %d", verdict)
 	}
@@ -143,7 +151,7 @@ func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	ctr := &api.Container{Id: "ctr-id", PodSandboxId: "sandbox-1", Name: "app"}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	p.recordForInventory(ctx, ctr, "registry/repo:latest")
+	p.recordForInventory(ctx, nil, ctr, "registry/repo:latest")
 
 	rec, ok := p.inventory.containers["ctr-id"]
 	if !ok {

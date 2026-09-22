@@ -17,8 +17,8 @@ into attestation).
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
 policy (`command`, `args`) permitted for those bytes, optionally to the
-environment values it may launch with (`env`), and the entry as a whole may
-carry a secret-store grant (`secrets`).
+environment values it may launch with (`env`) and the bind mounts it may receive
+(`mounts`), and the entry as a whole may carry a secret-store grant (`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -181,6 +181,117 @@ The NRI plugin enforces env after cumulative NRI adjustments, and the admission
 inventory carries an environment fingerprint for CDS workload matching and
 secret release.
 
+## Mount policy (`mounts`)
+
+`mounts` constrains bind mounts in the final OCI specification. The node
+classifies each source rather than trusting the destination alone: a hostPath,
+an `emptyDir`, and a ConfigMap can all be placed at the same destination while
+carrying very different authority over the container.
+
+An absent policy is `deny`, which permits only the platform mounts defined by
+the c8s NRI plugin in the node image. The plugin checks both destination and
+source ownership against this baseline:
+
+| Destination | Required source |
+| --- | --- |
+| `/etc/hosts` | The current pod's kubelet `etc-hosts` file. |
+| `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm` | The current sandbox's corresponding containerd file or directory under the standard containerd or RKE2 root/state directories. |
+| `/dev/termination-log` | A file in the current pod and container's kubelet `containers` directory. |
+| `/var/run/secrets/kubernetes.io/serviceaccount` | The current pod's kubelet projected volume named `kube-api-access-*`. |
+
+These mounts are also permitted implicitly by `exact`. A matching destination
+alone does not establish platform ownership. `any` leaves mounts unconstrained;
+`exact` requires the observed non-platform set to equal its concrete rules:
+
+```json
+"mounts": {
+  "policy": "exact",
+  "rules": [
+    {"destination": "/var/cache/app", "kind": "emptyDir"},
+    {"destination": "/mnt/c8s-data/config", "kind": "data"}
+  ]
+}
+```
+
+When deriving an entry, `--mounts=any|deny` applies one policy to every
+container it derives:
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts=any > entry.json
+```
+
+`--mounts-file` takes explicit per-container policies instead: the file maps
+container names to policies and must include every init and main container the
+entry declares; missing or unknown names are rejected. `derive` drops c8s's own
+injected containers from its input and names them on stderr, so a pod read back
+after admission derives the same entry as the manifest it was admitted from. For
+a pod with an init container named `seed` and main containers named `frontend`
+and `worker`, save this as `mounts.json`:
+
+```json
+{
+  "seed": {"policy": "deny"},
+  "frontend": {
+    "policy": "exact",
+    "rules": [
+      {"destination": "/var/cache/app", "kind": "emptyDir"},
+      {"destination": "/mnt/c8s-data/config", "kind": "data"}
+    ]
+  },
+  "worker": {"policy": "deny"}
+}
+```
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts-file mounts.json > entry.json
+```
+
+Here `pod.json` contains the Kubernetes object with digest-pinned images and
+explicit command/args. Choose the policies to match the workload's actual
+mounts; the pod spec alone cannot establish source class or storage protection.
+Omitting both flags leaves each container's mount policy at `deny`.
+
+Lint includes mount rules when checking whether workload entries are
+indistinguishable. It also rejects exact `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`,
+or `NODE_PATH` values whose search directories overlap a declared `data` mount:
+those directories could load mounted content as code. The deprecated
+`lint --cvm-mode` flag has no effect; NRI observes both environment and mounts.
+
+The pod UID embedded in a kubelet source must equal the pod being admitted, and
+containerd sandbox sources must name its exact sandbox. These runtime IDs prove
+local ownership only and are not serialized into the stable allowlist.
+
+| Observed source | Class | Storage | `exact` behavior |
+|---|---|---|---|
+| Node-created platform mount at its fixed destination | `platform` | not relevant | admitted without a rule |
+| Current pod's `emptyDir` on tmpfs | `emptyDir` | `memory` | requires a matching `emptyDir` rule |
+| Current pod's `emptyDir` whose backing chain reaches encrypted boot scratch | `emptyDir` | `encrypted` | requires a matching `emptyDir` rule |
+| Another pod's `emptyDir` | `host` | `unknown` | denied |
+| Mapping merely named `scratch` | `emptyDir` | `unknown` | denied |
+| Missing or inconsistent scratch evidence | `emptyDir` | `unknown` | denied |
+| Plain disk-backed `emptyDir` | `emptyDir` | `unknown` | denied |
+| ConfigMap, Secret, projected, PVC, CSI, local data, or a subpath | `data` | observed | requires a matching `data` rule under `/mnt/c8s-data/` and memory or encrypted storage |
+| Reserved `c8s-volume-*` placeholder or propagated volume | `data` | observed | requires the same `data` rule, including before volume propagation |
+| Host path or unrecognized source | `host` | `unknown` | denied |
+
+The Linux observer resolves tmpfs directly. For disk storage it resolves the
+containing mount and walks the device-mapper slave graph. A writable overlay
+mounted at a directory the measured image declares in `/usr/lib/confai/state.d`
+is the initrd's state overlay, whose upper layer lives on the boot scratch
+mapping; the observer proves that mapping from sysfs, because the upper
+directory the initrd recorded belongs to a mount namespace `switch_root`
+discarded. Any other overlay is followed to its upper directory. The current
+scratch contract requires the exact `scratch` mapper, a crypt device UUID, and
+ancestry reaching the virtio device with serial `confai-scratch`. The serial or
+mapper name alone is never proof.
+
+The initrd that creates scratch and generates its random in-memory key is part
+of the measured node image. Before RKE2 starts, `scratch-enforce` verifies the
+crypt mapping and backing device and writes a record tied to the current boot ID
+and device number under `/run/c8s`. NRI requires that record as well as the live
+backing chain. Fresh key creation remains an attested-initrd property; failure
+to establish any runtime evidence remains `unknown` and is denied.
+
 
 ## Secret grants (`secrets`)
 
@@ -210,15 +321,94 @@ filesystem once a value is inside it — so a grant names store paths only. An
 install still setting the per-container `paths` field needs
 [`secrets.md`](secrets.md#upgrading).
 
+## Host privilege
+
+The allowlist bounds which bytes run. It says nothing about what those bytes
+are *handed*, and on a node CVM that is the whole difference between a tenant
+container and node root: `privileged: true`, `hostNetwork`, a `hostPath` of
+`/`, or a device node all give an allowlisted image the node's memory, the
+volume plaintext and the admission plugin itself. Pod Security Admission in the
+node image does not close it — it is control-plane admission, and the operator
+owns the control plane.
+
+So the NRI plugin applies a second, fixed policy to every container: the
+**sandbox policy**. It is not a language for modelling OCI fields; it is one
+rule shared by every workload, checked on the OCI spec containerd persisted —
+the same final phase the env check runs in, after every plugin's adjustments.
+A container is denied when it holds any of:
+
+- a host ipc, network, pid or uts namespace;
+- a bind mount whose source the pod does not own — every mount the kubelet and
+  containerd stage lives under the pod's kubelet directory
+  (`/var/lib/kubelet/pods/<uid>/`) or its containerd sandbox directory, matched
+  as a clean-path prefix, so anything else is a `hostPath`;
+- a device node, a CDI device, or a host network device moved in;
+- an OCI hook, which names code outside the reviewed image and entrypoint;
+- a container sysctl;
+- the marks of a privileged container: no cgroup namespace, or a writable
+  `sysfs`/`cgroupfs` mount.
+
+A missing pod or container spec reads as every violation at once: unobservable
+is denied, not assumed safe. Denials log the whole observation node-locally, so
+a reviewer can write the missing rule from the record; the message the kubelet
+surfaces names only the violated rules, which are the pod's own spec.
+
+`policy.sandbox` selects `enforce` (deny), `audit` (record and admit) or `off`
+(do not observe). A parsed config with no value enforces.
+
+### What the node TCB is, and who may declare it
+
+Some containers must hold host privilege — the RKE2 static pods, Cilium,
+c8s's own node-level components. They are the node's trusted computing base,
+and the exemption belongs to whoever measured them.
+
+`allowlist.node_tcb: true` in the plugin's boot config marks that config's
+`allowlist.base` document as the node TCB: a container that base admits —
+digest, argv, env and mounts together — is exempt, and nothing else is. `policy.exempt_namespaces` does not reach it: the frozen snapshot
+admits an image the allowlist would deny, never a host privilege the pod spec
+claims. The node image sets it because its base is measured with the image
+(`node-guest-image/c8s/image-policy.yaml.in`). A chart-rendered boot config
+must not: that base comes from chart values, which the cluster admin the
+policy defends against chooses.
+
+A CDS-served document cannot express the marker: it is a boot-config key, not
+an allowlist field, and both allowlist parse paths reject unknown fields.
+Node-TCB status is a property of a measured boot config, never of a document.
+
+### What NRI does not show
+
+NRI v0.12.3 (`api.LinuxContainer`) carries namespaces, devices, mounts,
+hooks, CDI devices, sysctls, net devices and the seccomp policy. It does **not**
+carry the fields containerd also generates: Linux capabilities, the `privileged`
+flag itself, `no_new_privs`, masked and readonly paths, the AppArmor profile,
+and a read-only root. So this policy *infers* privilege from the cgroup
+namespace and writable `sysfs`, and cannot see a capability set at all — a pod
+adding `CAP_SYS_ADMIN` without any other privilege passes. Closing that needs
+the enforcement point to read `config.json` directly, not the NRI view.
+
+Two more limits: the host user namespace is the Kubernetes default, so its
+absence is no evidence and `hostUsers: false` is not required; and a cgroup v1
+node has no cgroup namespace on any container, so the privileged inference
+would refuse everything there.
+
+The exemption is only as narrow as the base entry. The node image's generated
+system entries admit their digests under `command`, `args` and `mounts` of
+`any`, so the control plane can restage one of those images — several ship a
+shell — as a privileged tenant pod and the base admits it. Closing that means
+pinning argv in the generated entries, which is systemfloor's to do; the
+plugin already matches the whole entry, so a pin takes effect as soon as it is
+measured.
+
 ## Where it's enforced
 
 Two independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), per container. Resolves the image
    digest and checks the effective argv at creation, validates env after
-   cumulative NRI adjustments, and rechecks the final OCI spec before start.
-   Fail-closed before the allowlist first loads; the plugin runs inside the
-   node CVM and is the primary admission gate.
+   cumulative NRI adjustments, and rechecks the final OCI spec before start —
+   where it also applies the sandbox policy above. Fail-closed before the
+   allowlist first loads; the plugin runs inside the node CVM and is the
+   primary admission gate.
 
 2. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
@@ -256,11 +446,14 @@ is not implemented and is out of scope here.
 
 ### The injected-container carve-out
 
-c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: the injected image is seeded as its own entry, so a workload entry
-never has to enumerate c8s's own sidecars. Nothing rests on the container
-*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+c8s injects its own init containers into every confidential pod — `c8s-cert`
+(get-cert) and `c8s-cert-wait`, joined by `c8s-secret` and `c8s-volume` when the
+pod asks for them. They pass the issuance gate by **digest**, not by name: the
+injected image is seeded as its own entry, so a workload entry never has to
+enumerate c8s's own sidecars. Matching rests on nothing the host writes, and the
+container *name* is one of those things; the names identify injection only over
+authored input, where admission reserves them and `c8s allowlist derive` drops
+them. get-cert runs with per-pod dynamic arguments,
 which is exactly why the seeded component entries carry `command: any, args:
 any`: their argv is not fixed and must not be argv-policed. Before matching, a
 container admitted that way and running an injected entrypoint is dropped from
@@ -301,24 +494,29 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
-Each enforcer also carries a **base enforcement allowlist** that admits by
-digest alone ahead of the served document and is never touched by a pull: the
-host NRI plugin's `allowlist.base` (an allowlist document baked into its boot
-config, chart-rendered from the chart's own component digests plus every
-`bootstrapAllowlist.workloads` container admitted under any command and args).
-That is what lets a node enforce at t=0 offline and bring the platform's own images
-up before CDS is reachable.
+`nriImagePolicy.refresh.interval` sets the poll, so a node runs the previous
+document for up to one interval after CDS commits a write; a node has taken a
+write once its plugin logs `pull loop: allowlist refreshed` with a version at or
+above the one `c8s allowlist list` reports.
+
+The host NRI plugin also carries a **base enforcement allowlist** in
+`allowlist.base`, baked into its boot config and never changed by a pull.
+Either a base entry or a served entry must satisfy the launch constraints.
+Both sources check argv at preliminary admission, then argv, environment, and
+mounts at final admission; unavailable evidence fails constrained policies.
+Generated system-image entries explicitly allow mounts and leave the other
+launch fields unconstrained so the platform can start before CDS is reachable.
 
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
 digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
 unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
-digest>` with a single container under `command: any, args: any`; an
+digest>` with a single container under `command: any, args: any, env: any, mounts: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
-rendered seed. Operator entries admitting a digest under any command and args
-also feed the host plugin's base allowlist; an entry that pins a command line
-is seed-only. The
+rendered seed. Operator entries with unconstrained command, args, environment,
+and mounts also feed the host plugin's base allowlist; constrained entries
+are seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
 running the old image keep matching while they recycle. The seed never
