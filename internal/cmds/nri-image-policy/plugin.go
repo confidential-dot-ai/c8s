@@ -85,15 +85,6 @@ func (s *policyStore) baseAdmits(r allowlist.RunningContainer, phase launchPhase
 	return s.base.AdmitsContainer(r)
 }
 
-// baseAdmitsDigest reports whether the base allowlist admits the digest under
-// any command line.
-func (s *policyStore) baseAdmitsDigest(digest string) bool {
-	if s == nil {
-		return false
-	}
-	return s.base.AdmitsDigest(digest)
-}
-
 // apply installs the pulled document at version, unless version is below the
 // applied one — an epoch rollback a withheld/rolled-back CDS must not use to
 // loosen a tightened policy. Reports whether it applied. Single-writer: only the
@@ -528,7 +519,7 @@ func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.
 	if verdict == verdictDeny || phase != launchFinal || !cfg.sandboxObserved() {
 		return verdict, reason
 	}
-	if v, r := p.checkSandbox(ctx, cfg, pod, ctr, imageRef); v == verdictDeny {
+	if v, r := p.checkSandbox(ctx, cfg, pod, ctr, imageRef, containerEnv(ctr), mounts); v == verdictDeny {
 		return v, r
 	}
 	return verdict, reason
@@ -600,9 +591,15 @@ func (p *plugin) exemptNamespace(ctx context.Context, cfg *config, pod *api.PodS
 // claims it as the node TCB (allowlist.node_tcb). A CDS-served entry never is: the
 // document is authored by the cluster admin this policy defends against.
 //
+// The exemption is the whole base entry — digest, argv, env and mounts — not
+// the digest alone: the control plane picks the image a pod runs, so a TCB
+// image restaged with another entrypoint is a tenant container, and an entry
+// with a pinned argv refuses it. An entry left at `any` exempts every launch of
+// its digest; see docs/allowlist-and-capabilities.md.
+//
 // The digest is resolved only when there is something to excuse, so an ordinary
 // container costs no containerd round-trip.
-func (p *plugin) checkSandbox(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
+func (p *plugin) checkSandbox(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) (imageVerdict, string) {
 	obs := observeSandbox(pod, ctr, cfg.WorkloadClaims.SocketDir)
 	violations := obs.violations()
 	if len(violations) == 0 {
@@ -611,7 +608,8 @@ func (p *plugin) checkSandbox(ctx context.Context, cfg *config, pod *api.PodSand
 	digest := ""
 	if cfg.Allowlist.NodeTCB {
 		digest = p.resolveDigest(ctx, imageRef)
-		if p.policy.baseAdmitsDigest(digest) {
+		rc := allowlist.RunningContainer{Digest: digest, Argv: ctr.GetArgs(), Env: env, Mounts: mounts}
+		if p.policy.baseAdmits(rc, launchFinal) {
 			return verdictAllow, ""
 		}
 	}

@@ -363,8 +363,8 @@ c8s's own node-level components. They are the node's trusted computing base,
 and the exemption belongs to whoever measured them.
 
 `allowlist.node_tcb: true` in the plugin's boot config marks that config's
-`allowlist.base` document as the node TCB: its digests are exempt, and nothing
-else is. `policy.exempt_namespaces` does not reach it: the frozen snapshot
+`allowlist.base` document as the node TCB: a container that base admits —
+digest, argv, env and mounts together — is exempt, and nothing else is. `policy.exempt_namespaces` does not reach it: the frozen snapshot
 admits an image the allowlist would deny, never a host privilege the pod spec
 claims. The node image sets it because its base is measured with the image
 (`node-guest-image/c8s/image-policy.yaml.in`). A chart-rendered boot config
@@ -390,6 +390,14 @@ Two more limits: the host user namespace is the Kubernetes default, so its
 absence is no evidence and `hostUsers: false` is not required; and a cgroup v1
 node has no cgroup namespace on any container, so the privileged inference
 would refuse everything there.
+
+The exemption is only as narrow as the base entry. The node image's generated
+system entries admit their digests under `command`, `args` and `mounts` of
+`any`, so the control plane can restage one of those images — several ship a
+shell — as a privileged tenant pod and the base admits it. Closing that means
+pinning argv in the generated entries, which is systemfloor's to do; the
+plugin already matches the whole entry, so a pin takes effect as soon as it is
+measured.
 
 ## Where it's enforced
 

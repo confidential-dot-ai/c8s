@@ -314,12 +314,35 @@ func privilegedContainer() *api.Container {
 	return ctr
 }
 
+// tcbAllowlist is a base holding one entry for digest: argv pinned to
+// /floor when pinned, otherwise any, and mounts unconstrained — the shape the
+// node image's generated system entries have.
+func tcbAllowlist(digest string, pinned bool) *allowlist.Allowlist {
+	command := allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}
+	args := allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}
+	if pinned {
+		command = allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/floor"}}
+		args = allowlist.ArgvPolicy{Policy: allowlist.PolicyExact}
+	}
+	return &allowlist.Allowlist{Schema: allowlist.Schema, Workloads: map[string]allowlist.Workload{
+		"floor": {Label: "floor", Containers: []allowlist.Container{{
+			Digest:  mustDigestOrPanic(digest),
+			Image:   "floor",
+			Command: command,
+			Args:    args,
+			Mounts:  allowlist.MountPolicy{Policy: allowlist.PolicyAny},
+		}}},
+	}}
+}
+
 func TestCheckSandboxModes(t *testing.T) {
 	tests := []struct {
 		name        string
 		sandbox     sandboxMode
 		nodeTCB     bool
 		floorDigest string // digest in the base allowlist; empty means the base holds another image
+		pinned      bool   // the base entry pins argv to /floor
+		argv        []string
 		want        imageVerdict
 	}{
 		{name: "off is not observed", sandbox: SandboxOff, want: verdictAllow},
@@ -337,13 +360,21 @@ func TestCheckSandboxModes(t *testing.T) {
 			name: "node TCB does not exempt a served entry", sandbox: SandboxEnforce, nodeTCB: true,
 			floorDigest: pushDigestB, want: verdictDeny,
 		},
+		{
+			name: "node TCB exempts a pinned entry at its own argv", sandbox: SandboxEnforce, nodeTCB: true,
+			floorDigest: pushDigestA, pinned: true, argv: []string{"/floor"}, want: verdictAllow,
+		},
+		{
+			name: "node TCB does not exempt a pinned entry restaged with a shell", sandbox: SandboxEnforce, nodeTCB: true,
+			floorDigest: pushDigestA, pinned: true, argv: []string{"/bin/sh", "-c", "id"}, want: verdictDeny,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			floor := anyAllowlist(map[string]string{pushDigestB: "other"})
+			floor := tcbAllowlist(pushDigestB, false)
 			if tt.floorDigest != "" {
-				floor = anyAllowlist(map[string]string{tt.floorDigest: "floor"})
+				floor = tcbAllowlist(tt.floorDigest, tt.pinned)
 			}
 			cfg := &config{
 				Allowlist: allowlistConfig{Base: floor, NodeTCB: tt.nodeTCB},
@@ -352,11 +383,13 @@ func TestCheckSandboxModes(t *testing.T) {
 			p := newTestPlugin(cfg)
 			p.policy = newPolicyStore(floor)
 
-			ctr := privilegedContainer()
+			pod, ctr := sandboxedPod(), privilegedContainer()
+			ctr.Args = tt.argv
 			verdict := verdictAllow
 			reason := ""
 			if cfg.sandboxObserved() {
-				verdict, reason = p.checkSandbox(context.Background(), cfg, sandboxedPod(), ctr, testFloorImage)
+				mounts := newMountObserver(nil).Observe(pod, ctr)
+				verdict, reason = p.checkSandbox(context.Background(), cfg, pod, ctr, testFloorImage, containerEnv(ctr), mounts)
 			}
 			if verdict != tt.want {
 				t.Fatalf("checkSandbox(%s) = %d %q, want %d", tt.name, verdict, reason, tt.want)
