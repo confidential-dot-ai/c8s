@@ -182,8 +182,8 @@ func (p *plugin) escalateOnRestart() bool {
 	if p.boot == nil || !p.bootRestart.Load() {
 		return false
 	}
-	if !p.cfg.PullEnabled() {
-		return true
+	if p.cfg.PullEnabled() {
+		return false
 	}
 	return p.policy.current().version > 0
 }
