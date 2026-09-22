@@ -319,7 +319,7 @@ func (c *config) Validate() error {
 		if _, err := refvalues.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_measurements: %w", err)
 		}
-		if _, err := refvalues.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
+		if _, err := refvalues.ParseRegisterPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
 		}
 	}

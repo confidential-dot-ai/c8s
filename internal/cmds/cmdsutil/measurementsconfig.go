@@ -127,11 +127,11 @@ func (s ImagePolicySource) Load(pins MeasurementPins) (remote.Policy, error) {
 	if err != nil {
 		return remote.Policy{}, fmt.Errorf("--%smeasurements: %w", pins.Prefix, err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(pins.Registers)
+	rtmrs, err := refvalues.ParseRegisterPins(pins.Registers)
 	if err != nil {
 		return remote.Policy{}, fmt.Errorf("--%srtmrs: %w", pins.Prefix, err)
 	}
-	return remote.Policy{Measurements: measurements, RTMRs: rtmrs}, nil
+	return remote.Policy{Measurements: measurements, Registers: rtmrs}, nil
 }
 
 // LoadMeasurements combines digest flags and a newline-separated digest

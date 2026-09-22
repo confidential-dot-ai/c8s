@@ -35,7 +35,7 @@ func newLintCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "ok: %s, %d image(s)\n", set.Family, len(set.Images))
 			for _, img := range set.Images {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", img.Name, len(img.RTMRs))
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", img.Name, len(img.Registers))
 			}
 			return nil
 		},

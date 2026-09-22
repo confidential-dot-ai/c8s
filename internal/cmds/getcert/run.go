@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -56,6 +55,7 @@ type config struct {
 	KeyPath                string
 	KeyOutPath             string
 	SAN                    string
+	SANFile                string
 	Verbose                bool
 	RenewInterval          time.Duration
 	RenewJitterPercent     int
@@ -131,6 +131,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
 	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM with mode 0600 (0640 in shared setgid directories; key reused on restart); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
+	flags.StringVar(&cfg.SANFile, "san-file", "", "Path to a file containing the certificate SAN; mutually exclusive with --san")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
 	flags.IntVar(&cfg.RenewJitterPercent, "renew-jitter-percent", defaultRenewJitterPercent, "Shorten each renewal delay by a random fraction of itself, up to this percent, so certificates issued together do not refresh in lockstep (0 = no jitter)")
@@ -151,7 +152,8 @@ alongside a workload that uses the obtained certificate.`,
 
 	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
-	_ = cmd.MarkFlagRequired("san")
+	cmd.MarkFlagsOneRequired("san", "san-file")
+	cmd.MarkFlagsMutuallyExclusive("san", "san-file")
 
 	return cmd
 }
@@ -213,6 +215,11 @@ func cdsPins(cfg config) (ratls.Pins, error) {
 var obtainCertFn = obtainCert
 
 func run(cfg config) error {
+	san, err := resolveSAN(cfg.SAN, cfg.SANFile)
+	if err != nil {
+		return err
+	}
+	cfg.SAN = san
 	slog.Info("starting get-cert", "san", cfg.SAN)
 
 	if err := validateConfig(cfg); err != nil {
@@ -681,9 +688,23 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-// hostnameLabelRe matches a valid RFC 1123 hostname label: alphanumeric, hyphens
-// allowed in the middle, 1-63 characters.
-var hostnameLabelRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+// resolveSAN loads the configured identity once, before network or output work.
+func resolveSAN(san, path string) (string, error) {
+	if path != "" {
+		if san != "" {
+			return "", fmt.Errorf("--san and --san-file are mutually exclusive")
+		}
+		var err error
+		san, err = cmdsutil.ReadSANFile("--san-file", path)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := validateSAN(san); err != nil {
+		return "", fmt.Errorf("certificate SAN: %w", err)
+	}
+	return san, nil
+}
 
 // validateSAN checks that a SAN is a valid IP address or RFC 1123 hostname.
 func validateSAN(san string) error {
@@ -700,21 +721,7 @@ func validateSAN(san string) error {
 	if strings.Contains(san, "*") {
 		return fmt.Errorf("'%s' contains a wildcard - wildcards are not supported", san)
 	}
-	return validateHostname(san)
-}
-
-// validateHostname checks that s is a valid RFC 1123 hostname.
-func validateHostname(s string) error {
-	if len(s) > 253 {
-		return fmt.Errorf("'%s' exceeds maximum hostname length of 253 characters", s)
-	}
-	labels := strings.SplitSeq(s, ".")
-	for label := range labels {
-		if !hostnameLabelRe.MatchString(label) {
-			return fmt.Errorf("'%s' is not a valid RFC 1123 hostname", s)
-		}
-	}
-	return nil
+	return cmdsutil.ValidateDNSName(san)
 }
 
 // isIPSAN returns true if the SAN is an IP address.

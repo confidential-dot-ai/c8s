@@ -50,6 +50,10 @@ func run(cfg config) error {
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
+	dnsPatterns, err := compileDNSPatterns(cfg.dnsSANPatterns, cfg.dnsSANFile)
+	if err != nil {
+		return err
+	}
 	// Resolve before validateConfig: the secrets predicate reads the flat
 	// lists, so a config-mode start must fill them first.
 	pinned, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
@@ -64,7 +68,7 @@ func run(cfg config) error {
 	if !pinned.Empty() {
 		digests, common, _ := pinned.Flatten()
 		cfg.measurements = digests
-		cfg.rtmrs = refvalues.FormatRTMRPins(common)
+		cfg.rtmrs = refvalues.FormatRegisterPins(common)
 		slog.Info("image policy loaded", "tee", pinned.Family, "images", len(pinned.Images))
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -132,7 +136,7 @@ func run(cfg config) error {
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
-	rtmrPins, err := refvalues.ParseRTMRPins(cfg.rtmrs)
+	rtmrPins, err := refvalues.ParseRegisterPins(cfg.rtmrs)
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
@@ -153,11 +157,6 @@ func run(cfg config) error {
 	measurementsDoc, err := refvalues.Render(served)
 	if err != nil {
 		return fmt.Errorf("render /measurements document: %w", err)
-	}
-
-	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
-	if err != nil {
-		return err
 	}
 	cnPattern, err := compilePattern("--allowed-cn-pattern", cfg.allowedCNPattern)
 	if err != nil {
@@ -202,7 +201,7 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
-	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs)
+	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs, cfg.kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -223,7 +222,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Images: pinned.Images},
+			ratls.Pins{Measurements: measurementBytes, Registers: rtmrPins, Images: pinned.Images},
 			cfg.requestTimeout,
 		)
 		if err != nil {

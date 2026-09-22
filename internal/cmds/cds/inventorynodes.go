@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -19,24 +20,37 @@ import (
 // buildInventoryHosts resolves the sandbox-digests dial bound: the operator's
 // explicit CIDRs when given, else one host route per node derived live from
 // the cluster's node objects.
-func buildInventoryHosts(ctx context.Context, cidrs []string) (workloadclaims.InventoryHosts, error) {
+func buildInventoryHosts(ctx context.Context, cidrs []string, kubeconfig string) (workloadclaims.InventoryHosts, error) {
 	if len(cidrs) > 0 {
 		return workloadclaims.ParseInventoryHosts(cidrs)
 	}
-	return watchNodeInventoryHosts(ctx)
+	return watchNodeInventoryHosts(ctx, kubeconfig)
 }
 
 // nodeCacheSyncTimeout bounds the startup wait for the first node list; a
 // package var so tests can shorten it.
 var nodeCacheSyncTimeout = 90 * time.Second
 
-// newKubeClientset is a package var so tests can substitute a fake clientset.
-var newKubeClientset = func() (kubernetes.Interface, error) {
+// newInClusterKubeClientset is a package var so tests can substitute a fake clientset.
+var newInClusterKubeClientset = func() (kubernetes.Interface, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s in-cluster config: %w", err)
 	}
 	return kubernetes.NewForConfig(restCfg)
+}
+
+// newKubeClientsetFromFile uses only the explicitly selected kubeconfig.
+func newKubeClientsetFromFile(kubeconfig string) (kubernetes.Interface, error) {
+	restCfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("load node inventory kubeconfig: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create node inventory client: %w", err)
+	}
+	return clientset, nil
 }
 
 // watchNodeInventoryHosts keeps the dial bound current with the node list: a
@@ -45,9 +59,18 @@ var newKubeClientset = func() (kubernetes.Interface, error) {
 // what answers must still pass mutually-attested RA-TLS on a privileged port
 // (docs/ratls.md). Without in-cluster config (local dev) the bound stays
 // empty and every sandbox token is refused, matching the previous posture.
-func watchNodeInventoryHosts(ctx context.Context) (workloadclaims.InventoryHosts, error) {
+func watchNodeInventoryHosts(ctx context.Context, kubeconfig string) (workloadclaims.InventoryHosts, error) {
 	hosts := &workloadclaims.NodeHosts{}
-	clientset, err := newKubeClientset()
+	var clientset kubernetes.Interface
+	var err error
+	if kubeconfig != "" {
+		clientset, err = newKubeClientsetFromFile(kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		clientset, err = newInClusterKubeClientset()
+	}
 	if err != nil {
 		slog.Warn("--sandbox-inventory-cidr not set and no in-cluster config: CDS will refuse any request carrying a sandbox token", "error", err)
 		return hosts, nil
