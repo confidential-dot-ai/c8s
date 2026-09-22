@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -260,16 +261,20 @@ func TestBootGateFailsClosedOnAnUnwritableMarker(t *testing.T) {
 }
 
 // Powering off can be refused (no CAP_SYS_BOOT); the plugin must still stop
-// serving, because containerd's required_plugins then blocks every create.
+// serving, because containerd's required_plugins then blocks every create. The
+// marker stays absent, so the plugin containerd relaunches finds the same
+// containers fatal again rather than re-checking them as a restart's.
 func TestBootGateExitsWhenPowerOffFails(t *testing.T) {
-	p, rec := gatedPlugin(t, filepath.Join(t.TempDir(), "registered"))
+	marker := filepath.Join(t.TempDir(), "registered")
+	p, rec := gatedPlugin(t, marker)
 	rec.fail = errors.New("operation not permitted")
 	p.containerd = &fakeContainerd{resolve: func(context.Context, string) (string, error) {
 		return "", errors.New("no store")
 	}}
 
 	pods := []*api.PodSandbox{makePod("default", "pod1")}
-	if _, err := p.Synchronize(context.Background(), pods, []*api.Container{makeCtr(pods[0].Id, "ctr1")}); err != nil {
+	ctrs := []*api.Container{makeCtr(pods[0].Id, "ctr1")}
+	if _, err := p.Synchronize(context.Background(), pods, ctrs); err != nil {
 		t.Fatalf("Synchronize = %v", err)
 	}
 	if rec.powerOffs != 1 {
@@ -277,6 +282,21 @@ func TestBootGateExitsWhenPowerOffFails(t *testing.T) {
 	}
 	if len(rec.exits) != 1 || rec.exits[0] != 1 {
 		t.Errorf("exits = %v, want a single exit(1) once the power-off is refused", rec.exits)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(marker) = %v, want the marker absent after a fatal first registration", err)
+	}
+
+	relaunched, rec := gatedPlugin(t, marker)
+	relaunched.containerd = p.containerd
+	if _, err := relaunched.Synchronize(context.Background(), pods, ctrs); err != nil {
+		t.Fatalf("Synchronize after relaunch = %v", err)
+	}
+	if rec.powerOffs != 1 {
+		t.Errorf("power offs = %d, want the relaunched plugin to find the same containers fatal", rec.powerOffs)
+	}
+	if relaunched.bootRestart.Load() {
+		t.Error("a relaunch after a fatal first registration reported itself as a restart")
 	}
 }
 

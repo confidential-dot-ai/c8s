@@ -61,15 +61,20 @@ func newBootGate(cfg *config, logger *slog.Logger) *bootGate {
 // check runs at Synchronize. It reports whether this is a plugin restart, in
 // which case the caller escalates a denied running container to fatal instead
 // of stopping it. On a first registration with containers it does not return.
+//
+// The marker is written last, once the registration is known to be clean. A
+// refused power-off exits the plugin with the marker absent, so a containerd
+// restart that relaunches it finds the same containers fatal again instead of
+// re-checking them as a restart's.
 func (g *bootGate) check(ctx context.Context, p *plugin, pods []*api.PodSandbox, ctrs []*api.Container) (restart bool) {
 	if g == nil {
 		return false
 	}
-	first, err := g.claimBoot()
+	first, err := g.firstBoot()
 	if err != nil {
 		// Unknown which case this is, so take the stricter one: a node whose
-		// /run cannot be written is not a node to trust with a lenient path.
-		g.logger.Error("cannot record the plugin's first registration; treating this as a first boot",
+		// /run cannot be read is not a node to trust with a lenient path.
+		g.logger.Error("cannot read the plugin's first-registration marker; treating this as a first boot",
 			"path", g.markerPath, "error", err)
 		first = true
 	}
@@ -78,18 +83,26 @@ func (g *bootGate) check(ctx context.Context, p *plugin, pods []*api.PodSandbox,
 			"containers", len(ctrs))
 		return true
 	}
-	if len(ctrs) == 0 {
-		g.logger.Info("first registration since boot: no container exists yet, as a static boot requires")
+	if len(ctrs) > 0 {
+		// Not stopped: each has already run on a node whose measurement claims
+		// nothing ran before admission, so stopping it would prove nothing. Only
+		// the node image sets policy.fatal_existing; a hosted cluster re-checks
+		// what it finds against the allowlist and stops what fails (plugin.go).
+		for _, attrs := range containerAttrs(ctx, p, pods, ctrs) {
+			g.logger.LogAttrs(ctx, slog.LevelError, "container running before admission was in place", attrs...)
+		}
+		g.fatal("containers were running when the image-policy plugin first registered")
 		return false
 	}
-	// Not stopped: each has already run on a node whose measurement claims
-	// nothing ran before admission, so stopping it would prove nothing. Only
-	// the node image sets policy.fatal_existing; a hosted cluster re-checks
-	// what it finds against the allowlist and stops what fails (plugin.go).
-	for _, attrs := range containerAttrs(ctx, p, pods, ctrs) {
-		g.logger.LogAttrs(ctx, slog.LevelError, "container running before admission was in place", attrs...)
+	if err := g.claimBoot(); err != nil {
+		// Without the marker the next registration reads as a first boot and,
+		// with containers by then running, powers the node off. A node whose
+		// /run cannot be written is not one to keep serving.
+		g.logger.Error("cannot record the plugin's first registration", "path", g.markerPath, "error", err)
+		g.fatal("cannot record the plugin's first registration")
+		return false
 	}
-	g.fatal("containers were running when the image-policy plugin first registered")
+	g.logger.Info("first registration since boot: no container exists yet, as a static boot requires")
 	return false
 }
 
@@ -106,24 +119,30 @@ func (g *bootGate) fatal(reason string) {
 	g.exit(1)
 }
 
-// claimBoot reports whether this is the first registration since boot, by
-// creating the marker exclusively. The marker lives on tmpfs, so a reboot
-// clears it and a plugin restart does not.
-func (g *bootGate) claimBoot() (bool, error) {
+// firstBoot reports whether the marker is absent. The marker lives on tmpfs,
+// so a reboot clears it and a plugin restart does not.
+func (g *bootGate) firstBoot() (bool, error) {
 	if g.markerPath == "" {
 		return false, errors.New("policy.boot_marker_path is empty")
 	}
+	_, err := os.Stat(g.markerPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
+}
+
+// claimBoot creates the marker exclusively, so a marker that appeared since
+// firstBoot is an error rather than a silent overwrite.
+func (g *bootGate) claimBoot() error {
 	if err := os.MkdirAll(filepath.Dir(g.markerPath), 0o700); err != nil {
-		return false, err
+		return err
 	}
 	f, err := os.OpenFile(g.markerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return false, nil
-		}
-		return false, err
+		return err
 	}
-	return true, f.Close()
+	return f.Close()
 }
 
 // containerAttrs describes every running container, one log record each, for
