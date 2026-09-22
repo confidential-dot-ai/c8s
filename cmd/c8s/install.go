@@ -31,6 +31,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/crane"
+	"github.com/confidential-dot-ai/c8s/internal/deployment"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -1396,8 +1397,9 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // GitOps/HelmRelease installs get it too), not emitted as a --set here; see
 // internal/helmchart/c8s/templates/webhook.yaml.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
-	if !slices.Contains(allowedCvmModes, cvmMode) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
+	bakedAttestationAndNRIPlugin, err := deployment.BakedAttestationAndNRIPlugin(cvmMode)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateHardwarePlatform(hardwarePlatform); err != nil {
 		return nil, err
@@ -1476,7 +1478,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// baked form — the pins below are the one thing an image built before this
 	// release cannot carry, and the installer is the only path that reaches the
 	// baked plugin's config.
-	if cvmMode == "bare-metal" {
+	if bakedAttestationAndNRIPlugin {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
 			"--set", "nriImagePolicy.baked=true",

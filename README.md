@@ -354,6 +354,11 @@ c8s allowlist upload allowlist.json \
   --operator-key operator.key
 ```
 
+For a bare-metal install, pass `--cvm-mode bare-metal` to `allowlist upload`;
+its required component set uses the measured host attestation service. GKE, AKS,
+and uploads without a mode require the attestation-api image. `--require`
+overrides the required set.
+
 `--measurements` identifies the trusted build of the endpoint you connected
 to. For the default public route, use the router launch digest; the CLI reads
 router's discovery document and verifies its attestation automatically.
