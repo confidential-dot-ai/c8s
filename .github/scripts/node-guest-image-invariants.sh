@@ -123,6 +123,7 @@ fi
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
 tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
+              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json' \
               'bash node-guest-image/tests/apparmor-runtime-test.sh' \
               'import the exact published image into a private root PVC' \
               'bash .github/scripts/tdx-image-acceptance.sh pvc'; do

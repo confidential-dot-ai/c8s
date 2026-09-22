@@ -84,10 +84,6 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-This is the guest-activation layer of a stack. Its signed launch contract
-requires the matching hardware-launcher changes in #552. Land the complete
-stack together before publishing or deploying images from it.
-
 `c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
 The [measured node image](../node-guest-image/README.md) runs CDS, the RA-TLS
 mesh, router and operator as Kubernetes workloads rendered from this chart

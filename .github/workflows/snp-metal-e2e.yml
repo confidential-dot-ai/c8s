@@ -1,52 +1,15 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
-# ═══════════════════════════════════════════════════════════════════════════
-# SOURCE OF TRUTH:
-#   confidential-dot-ai/c8s              .github/workflows/snp-metal-e2e.yml
-# VENDORED COPY:
-#   confidential-dot-ai/confidential-ci  .github/workflows/snp-metal-e2e.yml
-#
-# ═══════════════════════════════════════════════════════════════════════════
-# LANE: c8s on SEV-SNP BARE METAL
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Boots the PUBLISHED c8s SNP node image (node-guest-base, CDI disk + the
-# vCPU-matched IGVM) as a SEV-SNP CVM on sev-snp-gh-runner, proves the launch
-# through the attestation gate (`c8s get-kubeconfig`: the report's MEASUREMENT
-# must be a launch digest from the image's own manifest, HOSTDATA must bind the
-# per-run operator key), installs the c8s under test into it over that attested
-# kubeconfig, and runs c8s's own live e2e suites against it from the launcher.
-#
-# Nothing is delivered over the serial console and nothing runs in-guest as
-# root: the node image has no autologin, and that is the property that kept the
-# previous lane on a June 2026 rke2 image with a containerd too old for the NRI
-# plugin's adjustment validation (c8s#584). The shape is the TDX lane's
-# (.github/actions/tdx-metal-e2e), with SNP launch, IGVM and HOSTDATA in place
-# of TDX and RTMR[3].
-#
-# NOTHING IS PINNED. The node image follows the c8s commit under test: c8s-image
-# publishes node-guest-base:rke2-snp-cdi-<short sha> for every main commit, so
-# the lane walks the ref's ancestry to the newest published image, imports its
-# CDI disk into a shared root PVC named by digest (a no-op when a previous run
-# already did), stages its vCPU-matched IGVM beside the other IGVM files, and
-# reads launch digests from the build's own manifest.json. A stale pin cannot
-# exist because there is no pin.
-#
-# WHAT IT TESTS. The commit under test on the node image built from that same
-# commit, nri-image-policy fail-closed, floor probe included. No other pair can
-# work: the image bakes a fail-closed plugin whose floor pins its own CDS
-# digest, so a chart from another commit has its CDS denied at container
-# create, and the chart's policy.mode never reaches a baked plugin. The lane
-# therefore requires the exact image and fails with the publish to wait for
-# when it is missing; c8s's merge-triggered run chains off the node-image
-# publish so it always exists.
+# c8s product lane on AMD SEV-SNP metal. This c8s-owned integration boots the
+# published measured node image with signed launch configuration. Core services
+# are baked systemd units; Kubernetes receives only pre-rendered integration.
+# confidential-ci's older vendored lane must adopt this launch contract before
+# copying this file back. No runtime chart installation or console transport.
 name: snp-metal-e2e
 
 on:
   workflow_call:
     inputs:
       c8s_ref:
-        description: 'c8s ref to install and test. Empty = main.'
+        description: 'CLI/test ref; must resolve to the staged node image revision. Empty uses the image build ref.'
         required: false
         type: string
         default: ''
@@ -58,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: 'c8s ref to install and test. Empty = main.'
+        description: 'CLI/test ref; must resolve to the staged node image revision. Empty uses the image build ref.'
         required: false
         default: ''
       keep_cvm:
@@ -69,78 +32,91 @@ on:
 
 permissions:
   contents: read
-  # The reaper asks GitHub whether the owning run finished; without this it
-  # 403s silently and reaps on age alone.
+  # The reaper needs the owning run status; without this it falls back to age.
   actions: read
 
 concurrency:
+  # The lane shares the producer rootdisk PVC and measured IGVM file.
   group: snp-metal-e2e
   cancel-in-progress: false
 
 env:
   NS: confai-images
+  REFS_CM: snp-rke2-image-refs
   VM: c8s-snp-${{ github.run_id }}-${{ github.run_attempt }}
-  IMAGE_REPO: ghcr.io/confidential-dot-ai/node-guest-base
-  SMP: "4"
-  # The snp-hostdata build (confidential-metal#137): the dev build the other
-  # cells pin predates the host-data annotation and silently ignores it.
-  SIDECAR: ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:9bb4a027bb1b800b2af01625bf5525f45d6953cd088fb9f7526fb58521e5bf98
 
 jobs:
   e2e:
     name: cvm (snp-metal/rke2-node)
+    # Host-side launcher with namespace-scoped KubeVirt permissions; the
+    # outer cluster uses its in-cluster service account credentials.
     runs-on: cvm-launcher
-    timeout-minutes: 60
+    # CDI import is pre-staged, so: boot ~1m + guest first boot ~3m + c8s CLI
+    # build ~3m + services/convergence ~3m + asserts. Headroom for a cold go cache.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: tools (kubectl, go, crane, helm)
+      - name: tools (kubectl, go, crane)
         run: |
           set -euo pipefail
+          # Every fetch here crosses the public internet from an ephemeral ARC
+          # pod, and one hiccup fails the lane before it reaches a CVM.
+          if ! command -v openssl >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends openssl
+          fi
           mkdir -p "$PWD/bin"
-          # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
-          # A file, not a function, because each `run:` block is a fresh shell.
-          printf '%s\n' \
-            'retry() {' \
-            '  local i delay=2' \
-            '  for i in 1 2 3 4; do' \
-            '    if eval "$1"; then return 0; fi' \
-            '    [ "$i" -eq 4 ] && break' \
-            '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
-            '    sleep "$delay"' \
-            '    delay=$((delay * 2))' \
-            '  done' \
-            '  echo "::error::gave up after 4 attempts: $1" >&2' \
-            '  return 1' \
-            '}' > bin/retry.sh
+          # A file because each run block starts a fresh shell. Arguments are
+          # executed directly, including refs, without evaluating shell text.
+          cat > bin/retry.sh <<'RETRY'
+          retry() {
+            local attempt delay=2
+            for attempt in 1 2 3 4; do
+              if "$@"; then return 0; fi
+              [ "$attempt" -eq 4 ] && break
+              echo "attempt $attempt failed; retrying in ${delay}s" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            return 1
+          }
+          RETRY
           . bin/retry.sh
-          retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
+          kube_version=$(retry curl -fsSL https://dl.k8s.io/release/stable.txt)
+          retry curl -fsSL "https://dl.k8s.io/release/$kube_version/bin/linux/amd64/kubectl" -o bin/kubectl
           chmod +x bin/kubectl
           echo "$PWD/bin" >> "$GITHUB_PATH"
           if ! command -v go >/dev/null; then
+            # `|| true`: under `set -e` a failed substitution exits before the
+            # pinned fallback on the next line can be reached.
             GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
             [ -n "$GOVER" ] || GOVER=1.27.1
-            retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
+            retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+            sudo tar -C /usr/local -xzf /tmp/go.tar.gz
           fi
+          # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
+          # inside THIS one. `go install crane` below needs it here and now.
           export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
-          command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
-          # jq: a pinned static binary, not apt; the launcher pod's apt has no
-          # IPv6 route and has failed a run on an AAAA-only mirror answer.
-          command -v jq >/dev/null || retry 'curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o bin/jq && chmod +x bin/jq'
-          if ! command -v helm >/dev/null; then
-            retry 'curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm'
+          # crane: the image-tag lookups below use it. Pinned rather than
+          # fetched through the GitHub releases API, which rate-limits by IP
+          # on a shared self-hosted host. The ephemeral ARC pod has no crane,
+          # unlike the host, so install rather than assume.
+          command -v crane >/dev/null || retry go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          # Avoid apt's intermittent IPv6 mirror failures on the launcher.
+          if ! command -v jq >/dev/null; then
+            retry curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o bin/jq
+            chmod +x bin/jq
           fi
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
       # Fail SAFE: only reap on a positive "completed", or on age. An unknown
       # status (403/404/no token) KEEPS the CVM rather than killing a live run.
       - name: reap leaked CVMs from finished runs
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set +e +o pipefail
           NOW=$(date -u +%s)
@@ -152,6 +128,15 @@ jobs:
             [ "$rid" = "${{ github.run_id }}" ] && continue
             ct=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
             age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+            # Ask GitHub whether the owning run is actually finished, rather than
+            # waiting out the 3h age fallback while a CVM squats a finite host.
+            # ANY org repo can invoke this lane, so the owning repo is read from
+            # the annotation (a label value cannot hold the '/' in owner/repo).
+            # Ported from cvm-e2e.yml, which has had this since the SNP lane
+            # started leaking CVMs on cancelled runs.
+            # NOTE: this needs `actions: read`. Without it the call 403s, $st is
+            # empty, and we degrade to exactly the age-only behaviour this
+            # replaces, which is safe but slow.
             orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
             st=$(gh api "repos/${orepo:-${{ github.repository }}}/actions/runs/$rid" -q .status 2>/dev/null)
             if [ "$st" = "completed" ]; then
@@ -168,193 +153,94 @@ jobs:
               echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
             fi
           done
-          # Shared root disks outlive their runs by design; drop the ones no VMI
-          # references once they are a week old, so images do not pile up.
-          inuse=$(kubectl -n "$NS" get vmi -o jsonpath='{range .items[*]}{range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{"\n"}{end}{end}' 2>/dev/null)
-          for pvc in $(kubectl -n "$NS" get pvc -l ci.confidential.ai/resource=snp-node-root -o name 2>/dev/null); do
-            name=${pvc#persistentvolumeclaim/}
-            grep -qx "$name" <<<"$inuse" && continue
-            ct=$(kubectl -n "$NS" get "$pvc" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
-            age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
-            [ "$age" -gt 604800 ] && { echo "reaping root disk $name (unused, ${age}s old)"; kubectl -n "$NS" delete "$pvc" --ignore-not-found --wait=false; }
-          done
           exit 0
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - name: build the c8s CLI under test
+      - name: require compatible SNP image and launch metadata
+        # A NEW producer contract: the June console image is incompatible.
+        # Seed snp-rke2-image-refs with a c8s-launch/v1 image, its published
+        # manifest, matching IGVM/SMP and a host-data-capable hook image.
+        # OCI refs are immutable. No runtime digest learned from an unverified
+        # console and no fallback to the old rke2-image-refs ConfigMap.
+        env:
+          REQUESTED_C8S_REF: ${{ inputs.c8s_ref }}
         run: |
           set -euo pipefail
-          . "$GITHUB_WORKSPACE/bin/retry.sh"
-          REF="${{ inputs.c8s_ref }}"; REF="${REF:-main}"
-          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
-          git -C /tmp/c8s-src checkout -q "$REF" || { echo "::error::bad c8s ref '$REF'"; exit 1; }
-          echo "C8S_SOURCE_DIR=/tmp/c8s-src" >> "$GITHUB_ENV"
-          FULL=$(git -C /tmp/c8s-src rev-parse HEAD)
-          echo "C8S_SHA=$FULL" >> "$GITHUB_ENV"
-          echo "c8s ref sha: $FULL"
-          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
-          c8s --version || true
-          # IMAGE TAGS: docker.yml is path-gated, so a commit that touches no
-          # source has no :<short-sha> images. The image a commit X deploys is
-          # the newest built tag at or before X: walk X's ancestry until a tag
-          # exists. Only a 404 walks; a 429/5xx/timeout is retried, then fatal,
-          # so a registry hiccup never silently tests an older image.
-          tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/c8s-operator:pull" | jq -r .token)
-          TAG=""
-          for sha in $(git -C /tmp/c8s-src log --format=%h --abbrev=7 -50); do
-            for attempt in 1 2 3 4; do
-              code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-                "https://ghcr.io/v2/confidential-dot-ai/c8s-operator/manifests/${sha}")
-              case "$code" in
-                200) TAG=$sha; break 2 ;;
-                404) break ;;
-                *)   sleep $((attempt * 3)) ;;
-              esac
-            done
-            if [ "$code" != "404" ]; then
-              echo "::error::ghcr answered ${code} for c8s-operator:${sha} on 4 attempts; refusing to fall back to an older image"; exit 1
-            fi
+          kubectl -n "$NS" get cm "$REFS_CM" -o json > /tmp/snp-refs.json
+          jq -e '.data.launchConfigVersion == "c8s-launch/v1" and
+            (.data.image | test("^ghcr.io/[a-zA-Z0-9_./-]+@sha256:[0-9a-f]{64}$")) and
+            (.data.manifestRef | test("^ghcr.io/[a-zA-Z0-9_./-]+@sha256:[0-9a-f]{64}$")) and
+            (.data.igvmHookImage | test("^ghcr.io/[a-zA-Z0-9_./-]+@sha256:[0-9a-f]{64}$")) and
+            (.data.rootPvc | test("^[a-z0-9][a-z0-9.-]*$")) and
+            (.data.igvmFile | test("^[a-zA-Z0-9_./-]+$") and (contains("..") | not)) and
+            (.data.smp == "4") and
+            (.data.snpLaunchDigest | test("^[0-9a-f]{96}$")) and
+            (.data.c8sRef | test("^[0-9a-f]{7,40}$"))' /tmp/snp-refs.json >/dev/null || {
+              echo "::error::$REFS_CM lacks compatible, pinned SNP image metadata; publish the new node image and host-data-capable IGVM hook first"; exit 1;
+            }
+          for k in image rootPvc manifestRef igvmFile igvmHookImage smp snpLaunchDigest c8sRef; do
+            printf '%s=%s\n' "$k" "$(jq -r --arg k "$k" '.data[$k]' /tmp/snp-refs.json)" >> "$GITHUB_ENV"
           done
-          [ -n "$TAG" ] || { echo "::error::no c8s component image tag in the last 50 commits of $REF"; exit 1; }
-          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
-          echo "component images at :$TAG"
-
-      - name: resolve the node image for the ref under test
-        run: |
-          set -euo pipefail
-          # The node image built from the commit under test, rke2-snp-cdi-<sha>.
-          # c8s-image publishes one per main commit (retagging when the rootfs
-          # is unchanged). A registry hiccup is retried, then fatal.
-          tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
-          accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'
-          IMG_SHA=${C8S_SHA:0:7}; IMG_DIGEST=""
-          for attempt in 1 2 3 4; do
-            hdr=$(curl -sI --max-time 20 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
-              "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-cdi-${IMG_SHA}" | tr -d '\r')
-            code=$(awk 'NR==1{print $2}' <<<"$hdr")
-            case "$code" in
-              200) IMG_DIGEST=$(awk 'tolower($1)=="docker-content-digest:"{print $2}' <<<"$hdr"); break ;;
-              404) echo "::error::no node image for the commit under test: ${IMAGE_REPO}:rke2-snp-cdi-${IMG_SHA} is not published. The lane needs the exact pair (see the header); wait for this commit's c8s-image run, or dispatch with a c8s_ref whose image exists"; exit 1 ;;
-              *)   sleep $((attempt * 3)) ;;
-            esac
-          done
-          [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ghcr answered ${code:-none} for rke2-snp-cdi-${IMG_SHA} on 4 attempts"; exit 1; }
-          # The manifest the image build published: manifest.json is a layer of
-          # the oras artifact beside the CDI disk, as are the per-vCPU IGVMs.
-          oras=$(curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "$accept" -H "Accept: $accept" \
-            "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-${IMG_SHA}")
-          mlayer=$(jq -er '.layers[] | select(.annotations["org.opencontainers.image.title"]=="manifest.json") | .digest' <<<"$oras")
-          curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$mlayer" > /tmp/image-manifest.json
-          jq -e '.build.platform == "snp" and (.snp_variants | length > 0)' /tmp/image-manifest.json >/dev/null \
-            || { echo "::error::rke2-snp-${IMG_SHA} manifest.json is not an SNP node image manifest"; exit 1; }
-          LAUNCH_DIGEST=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .measurement.snp_launch_digest' /tmp/image-manifest.json)
-          IGVM_LAYER=$(jq -er --argjson smp "$SMP" '.igvm_layer // empty' /tmp/image-manifest.json 2>/dev/null || true)
-          IGVM_NAME=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .igvm.path' /tmp/image-manifest.json)
-          IGVM_SHA256=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .igvm.sha256' /tmp/image-manifest.json)
-          IGVM_LAYER=$(jq -er --arg t "$IGVM_NAME" '.layers[] | select(.annotations["org.opencontainers.image.title"]==$t) | .digest' <<<"$oras")
-          short12=${IMG_DIGEST#sha256:}; short12=${short12:0:12}
-          {
-            echo "IMG_SHA=$IMG_SHA"
-            echo "image=${IMAGE_REPO}@${IMG_DIGEST}"
-            echo "imageTag=rke2-snp-${IMG_SHA}"
-            echo "rootPvc=c8s-snp-root-${short12}"
-            echo "igvmFile=rke2-snp-${IMG_SHA}-smp${SMP}.igvm"
-            echo "IGVM_LAYER=$IGVM_LAYER"
-            echo "IGVM_SHA256=$IGVM_SHA256"
-            echo "launchDigest=$LAUNCH_DIGEST"
-          } >> "$GITHUB_ENV"
-          echo "c8s under test ${C8S_SHA:0:7} on its own node image rke2-snp-cdi-${IMG_SHA} (${IMG_DIGEST:0:19}...), smp${SMP} launch digest ${LAUNCH_DIGEST:0:24}..."
-
-      - name: stage the node image on the host (no-op when already staged)
-        run: |
-          set -euo pipefail
-          # Root disk: a CDI registry import into a PVC named by image digest,
-          # shared read-only by every run of this image. bm-e2e may create PVCs
-          # and pods, not DataVolumes, so the import is requested through the
-          # PVC annotations CDI honours (the TDX exact-image flow does the same).
-          if ! kubectl -n "$NS" get pvc "$rootPvc" >/dev/null 2>&1; then
-            kubectl apply -f - <<EOF
-          apiVersion: v1
-          kind: PersistentVolumeClaim
-          metadata:
-            name: $rootPvc
-            namespace: $NS
-            labels:
-              ci.confidential.ai/managed: "true"
-              ci.confidential.ai/resource: snp-node-root
-              confai.confidential.ai/source-digest-sha256: "${rootPvc#c8s-snp-root-}"
-            annotations:
-              cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-              cdi.kubevirt.io/storage.import.source: registry
-              cdi.kubevirt.io/storage.import.endpoint: "docker://$image"
-              cdi.kubevirt.io/storage.import.secretName: ghcr-pull
-              cdi.kubevirt.io/storage.contentType: kubevirt
-          spec:
-            accessModes: [ReadWriteOnce]
-            storageClassName: local-path
-            volumeMode: Filesystem
-            resources: {requests: {storage: 4Gi}}
-          EOF
+          # Keep the immutable image revision separate from the CLI override.
+          echo "IMAGE_C8S_REF=$(jq -r .data.c8sRef /tmp/snp-refs.json)" >> "$GITHUB_ENV"
+          if [ -n "$REQUESTED_C8S_REF" ]; then
+            [[ "$REQUESTED_C8S_REF" =~ ^[a-zA-Z0-9_./-]+$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
+            echo "c8sRef=$REQUESTED_C8S_REF" >> "$GITHUB_ENV"
           fi
-          for i in $(seq 1 120); do
-            phase=$(kubectl -n "$NS" get pvc "$rootPvc" -o jsonpath='{.metadata.annotations.cdi\.kubevirt\.io/storage\.pod\.phase}' 2>/dev/null || true)
-            case "$phase" in
-              Succeeded) echo "root disk $rootPvc ready"; break ;;
-              Failed) kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image failed"; exit 1 ;;
-            esac
-            [ "$i" -lt 120 ] || { kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image did not finish in 20 min (phase ${phase:-none})"; exit 1; }
-            sleep 10
-          done
-          # IGVM: a pod writes the vCPU-matched IGVM from the oras artifact into
-          # the igvm-files PVC the hook sidecar reads, after checking its sha256
-          # against the manifest. Atomic rename, so a concurrent run sees all or
-          # nothing.
-          STAGER="$VM-igvm-stage"
-          kubectl -n "$NS" delete pod "$STAGER" --ignore-not-found --wait=true >/dev/null
-          kubectl apply -f - <<EOF
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: $STAGER
-            namespace: $NS
-            labels: {ci.confidential.ai/managed: "true", ci.confidential.ai/run-id: "${{ github.run_id }}"}
-          spec:
-            restartPolicy: Never
-            activeDeadlineSeconds: 900
-            automountServiceAccountToken: false
-            nodeSelector: {confidential.ai/sev-snp: "true"}
-            securityContext: {runAsNonRoot: false, seccompProfile: {type: RuntimeDefault}}
-            containers:
-              - name: stage
-                image: alpine:3.20
-                command: ["/bin/sh", "-ec"]
-                args:
-                  - |
-                    if [ -f "/igvm/$igvmFile" ] && [ "\$(sha256sum "/igvm/$igvmFile" | cut -d' ' -f1)" = "$IGVM_SHA256" ]; then echo "already staged: $igvmFile"; exit 0; fi
-                    apk add --no-cache --quiet curl ca-certificates jq
-                    tok=\$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
-                    curl -fsSL -H "Authorization: Bearer \$tok" -o /work/igvm "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$IGVM_LAYER"
-                    got=\$(sha256sum /work/igvm | cut -d' ' -f1)
-                    [ "\$got" = "$IGVM_SHA256" ] || { echo "igvm sha256 \$got != manifest $IGVM_SHA256"; exit 1; }
-                    cp /work/igvm "/igvm/$igvmFile.$$" && chmod 0444 "/igvm/$igvmFile.$$" && mv "/igvm/$igvmFile.$$" "/igvm/$igvmFile"
-                    echo "staged $igvmFile (\$got)"
-                securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
-                resources: {requests: {memory: 256Mi, cpu: 250m, ephemeral-storage: 512Mi}, limits: {memory: 1Gi}}
-                volumeMounts:
-                  - {name: work, mountPath: /work}
-                  - {name: igvm, mountPath: /igvm}
-            volumes:
-              - {name: work, emptyDir: {sizeLimit: 1Gi}}
-              - {name: igvm, persistentVolumeClaim: {claimName: igvm-files}}
-          EOF
-          for i in $(seq 1 90); do
-            ph=$(kubectl -n "$NS" get pod "$STAGER" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            case "$ph" in Succeeded|Failed) break ;; esac
-            sleep 10
-          done
-          kubectl -n "$NS" logs "$STAGER" 2>&1 | tail -3
-          [ "${ph:-}" = Succeeded ] || { kubectl -n "$NS" describe pod "$STAGER" | tail -12; echo "::error::IGVM staging pod ended in phase ${ph:-none}"; exit 1; }
-          kubectl -n "$NS" delete pod "$STAGER" --ignore-not-found --wait=false >/dev/null
+
+      - name: verify the published SNP manifest matches the selected IGVM
+        run: |
+          set -euo pipefail
+          layer=$(crane manifest "$manifestRef" | jq -er '[.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json")] | if length == 1 then .[0].digest else error("expected one manifest.json layer") end')
+          crane blob "${manifestRef%%@*}@$layer" > /tmp/image-manifest.json
+          jq -e --arg digest "$snpLaunchDigest" --argjson smp "$smp" '
+            [.snp_variants[] | select(.smp == $smp)] |
+            length == 1 and .[0].measurement.algorithm == "sha384" and
+            .[0].measurement.snp_launch_digest == $digest
+          ' /tmp/image-manifest.json >/dev/null || {
+            echo "::error::published manifest does not pin the configured SNP launch digest for this SMP count"; exit 1;
+          }
+
+      - name: build the c8s CLI at the paired ref
+        run: |
+          set -euo pipefail
+          # Same exposure as the tools step: this clone and the module fetches
+          # behind `go install` cross the public internet under `set -e`.
+          . "$GITHUB_WORKSPACE/bin/retry.sh"
+          # This clone reproduces fine anonymously from a pod in arc-runners and
+          # from this runner image, so when it fails HERE the cause is something
+          # in the job's own context, and the bare error says nothing useful:
+          #   fatal: could not read Username for 'https://github.com'
+          # Capture the config git actually reads and the exchange it actually
+          # gets, redacting any credential the trace would otherwise print.
+          clone_diag() {
+            echo "::group::c8s clone diagnostics"
+            git config --list --show-origin 2>&1 \
+              | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
+              | sed 's/^/cfg  /' | head -40
+            env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
+              | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
+            GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
+              git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
+              | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
+              | tail -40 | sed 's/^/wire /'
+            echo "::endgroup::"
+          }
+          retry git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src \
+            || { clone_diag; exit 1; }
+          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+          # Compare the actual commit, not another ref lookup: a tag can
+          # shadow a short hexadecimal image revision.
+          source_sha=$(git -C /tmp/c8s-src rev-parse HEAD)
+          [[ "$IMAGE_C8S_REF" =~ ^[0-9a-f]{7,40}$ && "$source_sha" == "$IMAGE_C8S_REF"* ]] || {
+            echo "::error::c8s source $source_sha does not match staged SNP image revision $IMAGE_C8S_REF; publish and stage the requested commit's node image and matching metadata"; exit 1;
+          }
+          echo "c8s ref sha: $source_sha (matches staged image $IMAGE_C8S_REF)"
+          pushd /tmp/c8s-src >/dev/null
+          retry go install ./cmd/c8s
+          popd >/dev/null
+          c8s --version || true
 
       - name: preflight, SEV-SNP device capacity
         run: |
@@ -369,24 +255,23 @@ jobs:
             echo "no node read permission; skipping the SEV device capacity preflight"
           fi
 
-      # The initrd mounts the ISO labelled "opkeydata", SHA-256s the file named
-      # `pubkey` and refuses to boot unless the report's HOSTDATA equals it.
-      # The launcher commits that same SHA-256 as HOSTDATA through the IGVM
-      # sidecar's snp.confidential.ai/host-data annotation (canonical base64 of
-      # the 32 bytes), so the kubeconfig fetched below is bound to THIS keypair.
-      - name: per-run operator key + opkeydata secret
+      - name: sign the server launch and attach opkeydata
+        # The same exact public PEM is signed into launch.yaml, bound by the
+        # measured initrd against HOSTDATA, and pinned by external clients.
         run: |
           set -euo pipefail
-          umask 077
-          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
-          openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+          # The published manifest pins this SMP count's launch digest (checked
+          # above); the bundle's server.key doubles as the run's operator key.
+          c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
+            --image-manifest /tmp/image-manifest.json --vcpus "$smp"
+          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/server/pubkey | base64 -w0)" >> "$GITHUB_ENV"
           kubectl -n "$NS" create secret generic "$VM-opkey" \
-            --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl apply -f -
-          HOST_DATA=$(openssl dgst -sha256 -binary /tmp/op.pub | base64 -w0)
-          echo "HOST_DATA=$HOST_DATA" >> "$GITHUB_ENV"
-          echo "operator key bound: HOSTDATA sha256 $(openssl dgst -sha256 /tmp/op.pub | cut -d' ' -f2 | cut -c1-16)..."
+            --from-file=pubkey=/tmp/launch-data/server/pubkey \
+            --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
+            --from-file=launch.yaml.sig=/tmp/launch-data/server/launch.yaml.sig \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: boot the SEV-SNP CVM
+      - name: boot the SNP CVM
         run: |
           set -euo pipefail
           kubectl apply -f - <<EOF
@@ -406,7 +291,9 @@ jobs:
           metadata: {name: $VM-cloudinit, namespace: $NS}
           type: Opaque
           # Bait, not configuration: the node image disables cloud-init, so
-          # this host disk must be inert (asserted by the tripwire step below).
+          # this host disk must be inert (asserted by the tripwire step
+          # below). c8s-local patch — mirror to confidential-ci before
+          # re-vendoring.
           stringData:
             userdata: |
               #cloud-config
@@ -431,40 +318,45 @@ jobs:
             runStrategy: Always
             template:
               metadata:
-                labels: {vm.kubevirt.io/name: $VM}
+                labels: {kubevirt.io/domain: $VM}
                 annotations:
                   igvm.confidential.ai/file: "$igvmFile"
-                  snp.confidential.ai/host-data: "$HOST_DATA"
-                  hooks.kubevirt.io/hookSidecars: '[{"image":"$SIDECAR","imagePullPolicy":"IfNotPresent","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
+                  snp.confidential.ai/host-data: "$SNP_HOST_DATA"
+                  hooks.kubevirt.io/hookSidecars: '[{"image":"$igvmHookImage","imagePullPolicy":"IfNotPresent","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
               spec:
                 nodeSelector:
                   confidential.ai/sev-snp: "true"
                 domain:
                   cpu:
                     model: EPYC-Genoa
-                    cores: $SMP          # MUST match the IGVM's measured vCPU count
-                  memory: {guest: 16Gi}
-                  resources: {requests: {memory: 16Gi}}
-                  firmware: {bootloader: {efi: {secureBoot: false}}}
-                  launchSecurity: {snp: {}}
+                    cores: $smp
                   devices:
+                    autoattachVSOCK: true
                     disks:
                       - name: rootdisk
                         # dm-verity rootfs: never written. readonly takes a
-                        # SHARED qemu lock so concurrent CVMs coexist on the
-                        # staged PVC; writable takes an EXCLUSIVE one.
+                        # SHARED qemu lock so concurrent CVMs coexist; a
+                        # writable open takes an EXCLUSIVE one and starves every
+                        # other guest on the same PVC (cost the SNP lane a day).
+                        # NB: readonly is a field of disk, not a sibling of it;
+                        # KubeVirt's strict decoder rejects the sibling form.
                         disk: {bus: virtio, readonly: true}
                       - name: scratch
                         disk: {bus: virtio}
-                        # The initrd keys the encrypted overlay off this exact
-                        # serial; without it the guest falls back to a 2G tmpfs.
+                        # HARD requirement: the initrd keys the encrypted
+                        # overlay off this exact serial. Without it the guest
+                        # falls back to a 2G tmpfs and rke2 wedges when full.
                         serial: confai-scratch
                       - name: opkey
                         disk: {bus: virtio}
                       - name: cloudinit
                         disk: {bus: virtio}
-                    interfaces: [{name: default, bridge: {}}]   # masquerade is broken under SNP
+                    interfaces: [{name: default, bridge: {}}]
                     rng: {}
+                  firmware: {bootloader: {efi: {secureBoot: false}}}
+                  launchSecurity: {snp: {}}
+                  memory: {guest: 16Gi}
+                  resources: {requests: {memory: 16Gi}}
                 networks: [{name: default, pod: {}}]
                 volumes:
                   - name: rootdisk
@@ -476,30 +368,29 @@ jobs:
                   - name: cloudinit
                     cloudInitNoCloud: {secretRef: {name: $VM-cloudinit}}
           EOF
-          for i in $(seq 1 70); do
+          for _ in $(seq 1 60); do
             PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             [ "$PHASE" = Running ] && break
-            sleep 6
+            sleep 5
           done
           if [ "${PHASE:-}" != Running ]; then
-            kubectl -n "$NS" describe vmi "$VM" | tail -30
-            echo "::error::VMI not Running (phase=${PHASE:-none})"
+            kubectl -n "$NS" describe vmi "$VM" | tail -25
+            echo "::error::VMI not Running (phase=${PHASE:-none}). check SNP host capacity, the measured IGVM, and the host-data hook"
             exit 1
           fi
-          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name | head -1)
-          echo "POD=${POD#pod/}" >> "$GITHUB_ENV"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || true)
             [ -n "$IP" ] && break
             sleep 5
           done
           [ -n "${IP:-}" ] || { echo "::error::the VMI never reported an IP"; kubectl -n "$NS" describe vmi "$VM" | tail -20; exit 1; }
           echo "GUEST_IP=$IP" >> "$GITHUB_ENV"
-          echo "VMI Running at $IP (launcher ${POD#pod/})"
+          echo "VMI Running at $IP"
 
       - name: assert genuine SEV-SNP launch with the bound HOSTDATA
         run: |
           set -euo pipefail
+          POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name | head -1)
           kubectl -n "$NS" exec "$POD" -c compute -- \
             sh -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline' > /tmp/qemu.cmdline
           # libvirt renders the object either as key=value or as JSON
@@ -507,96 +398,83 @@ jobs:
           OBJ=$(grep -A1 -x -- '-object' /tmp/qemu.cmdline | grep 'sev-snp-guest' | head -1 || true)
           echo "sev-snp-guest object: ${OBJ:-<none>}"
           [ -n "$OBJ" ] || { echo "::error::qemu has no sev-snp-guest object: not a genuine SNP guest"; exit 1; }
-          case "$OBJ" in *"$HOST_DATA"*) ;; *) echo "::error::the sev-snp-guest object carries no host-data equal to this run's operator-key hash; the binding is missing"; exit 1 ;; esac
+          case "$OBJ" in *"$SNP_HOST_DATA"*) ;; *) echo "::error::the sev-snp-guest object carries no host-data equal to this run's operator-key hash; the binding is missing"; exit 1 ;; esac
           echo "OK: qemu launched with -object sev-snp-guest and host-data bound to this run's operator key"
 
-      - name: wait for guest services (attestation-api, apiserver, cred-release)
+      - name: wait for the credential-release listener
+        # HTTP reachability only; the next step verifies hardware evidence,
+        # the full image tuple and our operator key before accepting credentials.
+        # The raw attestation API is loopback-only in the measured image.
         run: |
           set -euo pipefail
-          H=""
-          for i in $(seq 1 90); do
-            H=$(curl -s --connect-timeout 2 --max-time 4 "http://$GUEST_IP:8400/health" 2>/dev/null || true)
-            [ -n "$H" ] && { echo "attestation-api: $H"; break; }
-            sleep 10
-          done
-          echo "$H" | grep -qiE '"platform":"[^"]*snp' || { echo "::error::attestation-api did not report an SNP platform"; exit 1; }
-          for i in $(seq 1 60); do
-            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:6443/livez" 2>/dev/null || true)
-            case "$C" in 200|401|403) echo "kube-apiserver: HTTP $C"; break;; esac
+          ready=0
+          for _ in $(seq 1 120); do
+            code=$(curl -sk --connect-timeout 2 --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
+            if [ -n "$code" ] && [ "$code" != 000 ]; then ready=1; break; fi
             sleep 5
           done
-          for i in $(seq 1 60); do
-            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
-            [ -n "$C" ] && [ "$C" != 000 ] && { echo "cred-release: HTTP $C"; break; }
-            sleep 5
-          done
+          [ "$ready" = 1 ] || { echo "::error::credential release did not start; signed launch or measured service startup failed"; exit 1; }
 
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
           set -euo pipefail
+          # The immutable published manifest was checked before launch. The
+          # credential gate verifies SNP hardware evidence, launch digest and
+          # HOSTDATA=SHA256(our exact operator public PEM); no TOFU fallback.
           # cred-release opens :8443 a little before its release handler can
           # serve (first RA-TLS quote, client CA); that window answers a POST
           # with EOF. Retry a bounded number of times and print each failure.
           ok=""
           for attempt in 1 2 3 4 5 6; do
-            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
+            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/server.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
             echo "get-kubeconfig attempt $attempt failed; retrying in 20s"
             sleep 20
           done
           [ -n "$ok" ] && [ -s /tmp/guest.kubeconfig ] || { echo "::error::no attested kubeconfig after 6 attempts"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
-          echo "OK: attested kubeconfig (MEASUREMENT in snp_variants, HOSTDATA = this run's key), identity=$WHO"
+          echo "OK: attested kubeconfig, identity=$WHO"
           KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes
 
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
 
-      - name: install the c8s under test
+      - name: assert measured services and Kubernetes integration converged
+        # components-ready checks every baked workload and its policy mounts,
+        # then verifies the CDS front door against the full server policy.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          c8s install --cvm-mode bare-metal --single-node --hardware-platform sev-snp \
-            --image-tag "$IMAGE_TAG" \
-            --operator-keys /tmp/op.pub \
-            --measurements "$launchDigest" \
-            --resolve-digests=true
-          kubectl -n c8s-system get pods -o wide
-
-      - name: assert components converged
-        run: |
-          set -euo pipefail
-          export KUBECONFIG=/tmp/guest.kubeconfig
-          bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
+          export C8S_NODE_IMAGE=1
+          export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          bash /tmp/c8s-src/test/e2e/components-ready.sh
 
       - name: assert the image floor denies, then opens to a signed write
-        # The router fronts /allowlist on hostPort 443 and the endpoint pins to
-        # the launch digest.
+        # Baked nginx fronts /allowlist on 443; discovery pins the whole
+        # measured image tuple and the server operator key.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS="$launchDigest"
-          export C8S_OPERATOR_KEY=/tmp/op.key
-          bash "$C8S_SOURCE_DIR/test/e2e/allowlist-enforcement.sh"
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
+          bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
 
       - name: assert a confidential workload runs with an injected cert
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS="$launchDigest"
-          export C8S_OPERATOR_KEY=/tmp/op.key
-          bash "$C8S_SOURCE_DIR/test/e2e/cw-workload.sh"
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
+          bash /tmp/c8s-src/test/e2e/cw-workload.sh
 
-      - name: assert the cw label policy
+      - name: assert confidential workload label integrity
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS="$launchDigest"
-          export C8S_OPERATOR_KEY=/tmp/op.key
-          bash "$C8S_SOURCE_DIR/test/e2e/cw-label-policy.sh"
+          bash /tmp/c8s-src/test/e2e/cw-label-policy.sh
 
       - name: diagnostics (on failure)
         if: failure() || cancelled()
@@ -604,7 +482,7 @@ jobs:
           set +e
           echo "::group::host-side VMI and launcher"
           kubectl -n "$NS" describe vmi "$VM" 2>&1 | tail -30
-          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name 2>/dev/null | head -1)
+          POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name 2>/dev/null | head -1)
           [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" --all-containers --tail=40 2>&1 | grep -iE 'igvm|host-data|hostData|sev|error' | tail -20
           echo "::endgroup::"
           # The guest's serial console is read-only here (no autologin), but its
@@ -637,14 +515,14 @@ jobs:
         if: always()
         run: |
           {
-            echo "### c8s on SEV-SNP metal"
+            echo "### c8s on SNP metal"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| node image | \`${image:-?}\` (\`rke2-snp-cdi-${IMG_SHA:-?}\`) |"
-            echo "| manifest | \`${imageTag:-?}\` (smp${SMP}) |"
-            echo "| launch digest | \`${launchDigest:0:32}...\` |"
-            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy fail-closed, exact pair |"
+            echo "| image | \`${image:-?}\` |"
+            echo "| rootPvc | \`${rootPvc:-?}\` |"
+            echo "| c8s ref | \`${c8sRef:-?}\` |"
+            echo "| SNP launch digest | \`${snpLaunchDigest:0:32}...\` |"
             echo "| guest | \`${GUEST_IP:-?}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -656,6 +534,5 @@ jobs:
           kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s || cleanup_failed=1
           kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found || cleanup_failed=1
           kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false || cleanup_failed=1
-          kubectl -n "$NS" delete pod "$VM-igvm-stage" --ignore-not-found --wait=false || true
           [ "$cleanup_failed" = 0 ] || echo "::error::SNP cleanup incomplete; owned resources may need orphan reaping"
           exit "$cleanup_failed"

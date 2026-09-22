@@ -207,9 +207,27 @@ used by the manifests. The reproducibility gate's `C8S_BINARY` overrides the
 host binary and embedded chart; container images still resolve from
 `C8S_REF`. A source-only binary override does not replace those containers.
 
-This layer activates the signed guest contract. The matching hardware
-launchers and acceptance metadata arrive in #552. Land the complete stack
-together before publishing or deploying the image.
+The staged SNP metal CI lane requires compatible image metadata with
+`launchConfigVersion=c8s-launch/v1`:
+
+| ConfigMap | Additional required fields |
+|---|---|
+| `snp-rke2-image-refs` | `image`, `rootPvc`, `manifestRef`, `igvmFile`, `igvmHookImage`, `smp`, `snpLaunchDigest`, `c8sRef` |
+
+The SNP lane requires digest-pinned OCI references for `image`, `manifestRef`
+and `igvmHookImage`, and a hook that sets HOST_DATA from the launch public key.
+Its `smp` is currently `4`; `snpLaunchDigest` must match that variant in the
+published `manifest.json`. The paired `c8sRef` identifies the image build.
+Changing the attester requires a new measured image. The ordinary TDX lane
+resolves its published image and manifest from the selected source commit.
+Automatic TDX acceptance reads the image identity and
+`launch_config_version=c8s-launch/v1` from the publication run's validated
+evidence. Neither TDX path reads a refs ConfigMap.
+
+Before either platform boots, the lane builds the paired CLI and generates
+a fresh operator key and signed server launch document. The `opkeydata` disk
+carries `pubkey`, `launch.yaml` and `launch.yaml.sig`. Clients use the matching
+full image tuple and server-key policy when testing the baked services.
 
 ## Baked workload checks
 
@@ -366,18 +384,18 @@ c8s cluster and run `make test-node-guest-image-apparmor-runtime` (requires
 `kubectl` and `jq`). This creates and cleans up a test namespace and a
 `kube-system` pod with `SYS_ADMIN`.
 
-The workflow description below is retained for the existing image contract.
-The final stack layer updates these launchers and acceptance evidence for the
-signed guest contract; it must land before this layer's images are published.
-
 Automatic main-push publication in `c8s-image-publish.yml` calls the separate
 `tdx-image-acceptance.yml` workflow after the build finishes. Only this
 automatic publisher can call exact-image acceptance; neither workflow has a
 manual-dispatch trigger. It consumes the same run and attempt's
-immutable evidence: the source SHA, CDI and ORAS digests, and the published
-manifest. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must match the fresh
-build; a differing nonmeasured build timestamp is not a mismatch. The
-published manifest is passed unchanged to `get-kubeconfig` for attestation.
+immutable evidence: the source SHA, CDI and ORAS digests, the published
+manifest, and `launch_config_version=c8s-launch/v1`. Evidence validation
+binds these to the publication run and attempt and rejects a missing or
+incompatible launch version. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must
+match the fresh build; a differing nonmeasured build timestamp is not a
+mismatch. The validated tuple supplies the signed launch configuration before
+boot. The published manifest is also passed unchanged to `get-kubeconfig`
+for attestation, together with that launch's operator private key.
 Tests are checked out at the build SHA. Before allocating the launcher,
 the reusable workflow independently requires a successful same-repository
 `main` push and exposes no c8s-ref override in exact-image mode. A read-only
@@ -388,17 +406,23 @@ workspace HEAD equals that full SHA, then reuses the verified workspace for
 the CLI build and every E2E script. The seven-character ref selects only OCI
 image tags in exact mode.
 
-The staged `tdx-metal-e2e.yml` wrapper checks out its workflow revision
-independently and builds the CLI from the image's paired ref or the explicit
-`c8s_ref` override. The optional `imageTag` in `tdx-rke2-image-refs` supplies
-the staged image's manifest tag when digest-to-tag discovery cannot find it.
+The `tdx-metal-e2e.yml` wrapper checks out its workflow revision independently.
+It builds the CLI and runs tests from that checkout, or from the explicit
+`c8s_ref` when supplied. The resolved commit selects its published
+`rke2-tdx-cdi-<sha>` disk and `rke2-tdx-<sha>` manifest; a missing image fails
+the run. The disk is pinned by digest and imported into a shared root PVC.
+Reusing that PVC requires its full import endpoint to match the selected
+image. The published manifest must contain the full MRTD/RTMR1/RTMR2 tuple
+and supplies both the signed launch configuration and attested kubeconfig
+retrieval. No refs ConfigMap is needed for TDX.
 Both wrappers share the lifecycle in `.github/actions/tdx-metal-e2e/action.yml`
 and the same concurrency group; checkout and evidence acquisition stay
 outside that shared action. Run the real-Git provenance, matching-prefix tag,
 source rejection, E2E routing and caller-isolation tests with
 `go test ./test/workflows`. These local tests do not boot a node image.
 
-That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
+The exact-image job imports the digest-pinned disk into its own 80Gi
+`local-path` PVC.
 A restricted scheduling pod selects a TDX node before CDI import starts;
 the pod has no service-account token or disk mount. Import has a 20-minute
 deadline, and cleanup checks ownership of the temporary pod and PVC. This
@@ -411,10 +435,10 @@ on the TDX runner; the local evidence/lifecycle fixtures are run with:
 bash .github/scripts/tests/test-tdx-image-acceptance.sh
 ```
 
-The ordinary `confidential-e2e` TDX lane continues testing the pre-staged
-stack; it does not claim to validate the newly built image and does not run
-the new-image AppArmor gate. Exact-image acceptance is post-publication
-validation, not a gate on stable-alias promotion. Manual, development and
+The ordinary `confidential-e2e` TDX lane tests the image published for the
+requested commit. It does not consume publication-run acceptance evidence
+or run the automatic new-image AppArmor gate. Exact-image acceptance is
+post-publication validation, not a gate on stable-alias promotion. Manual, development and
 PR reproducibility builds do not invoke it. Attempt-bound evidence means
 rerunning the full publication workflow, including the builder, if the
 current attempt has no artifact; there is no fallback to older evidence.
@@ -422,7 +446,7 @@ For manual image builds, dispatch `c8s-image-manual.yml` (Actions name:
 `c8s-image manual`), with the existing `dev`, `c8s_ref`, `confos_ref` and
 `gate` inputs. It builds through the same reusable builder but cannot call
 exact acceptance or promote stable aliases. `tdx-metal-e2e.yml` remains
-manually dispatchable for staged-stack regression and `keep_cvm` debugging.
+manually dispatchable for published-image regression and `keep_cvm` debugging.
 
 ## Refreshing measurements
 
