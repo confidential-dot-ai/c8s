@@ -2,9 +2,11 @@ package allowlist
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/deployment"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -74,6 +76,7 @@ func newUploadCmd(o *options) *cobra.Command {
 		force    bool
 		strict   bool
 		required []string
+		cvmMode  string
 	)
 	cmd := &cobra.Command{
 		Use:   "upload <file>",
@@ -81,13 +84,19 @@ func newUploadCmd(o *options) *cobra.Command {
 		Long: `Atomically replace the entire allowlist with the contents of <file> (the
 canonical JSON 'export' writes). CDS assigns the new version.
 
-If none of the file's image labels name a core c8s component (` + fmt.Sprintf("%v", defaultRequiredComponents) + `),
+If any required core c8s component is missing from the file's image labels (` + fmt.Sprintf("%v", defaultRequiredComponents) + `),
 upload refuses unless --force, since a cluster missing them cannot pull its own
-control plane. Override the required set with --require. The file is lint-checked
+control plane. --cvm-mode bare-metal omits attestation-api from this set because
+the measured node image supplies it. With gke, aks, or no mode, the full set is
+required. Override the required set with --require. The file is lint-checked
 before upload; --strict makes lint warnings fatal.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
+				return err
+			}
+			reqComponents, err := requiredComponentsForMode(cvmMode)
+			if err != nil {
 				return err
 			}
 			desired, err := loadAllowlistFile(args[0])
@@ -108,7 +117,6 @@ before upload; --strict makes lint warnings fatal.`,
 				return fmt.Errorf("refusing to upload: %d lint warning(s) with --strict", len(findings))
 			}
 
-			reqComponents := defaultRequiredComponents
 			if len(required) > 0 {
 				// An empty needle matches every ref and would silently disable the
 				// guard; reject it (and a bare wildcard) outright.
@@ -155,11 +163,28 @@ before upload; --strict makes lint warnings fatal.`,
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode: bare-metal, gke, or aks (bare-metal uses the measured host attestation service; omitted requires all core components)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show the diff without replacing the allowlist")
 	cmd.Flags().BoolVar(&force, "force", false, "upload even if core c8s components are missing")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat lint warnings as fatal")
 	cmd.Flags().StringSliceVar(&required, "require", nil, "component identifiers that must appear in the uploaded image refs (overrides the default set)")
 	return cmd
+}
+
+func requiredComponentsForMode(mode string) ([]string, error) {
+	if mode == "" {
+		return defaultRequiredComponents, nil
+	}
+	baked, err := deployment.BakedAttestationAndNRIPlugin(mode)
+	if err != nil {
+		return nil, err
+	}
+	if baked {
+		return slices.DeleteFunc(slices.Clone(defaultRequiredComponents), func(component string) bool {
+			return component == "attestation-api"
+		}), nil
+	}
+	return defaultRequiredComponents, nil
 }
 
 // requireLabel rejects an empty or bare-wildcard label. Image and name labels
