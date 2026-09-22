@@ -173,7 +173,7 @@ before upload; --strict makes lint warnings fatal.`,
 
 func requiredComponentsForMode(mode string) ([]string, error) {
 	if mode == "" {
-		return defaultRequiredComponents, nil
+		return slices.Clone(defaultRequiredComponents), nil
 	}
 	baked, err := deployment.BakedAttestationAndNRIPlugin(mode)
 	if err != nil {
@@ -184,7 +184,7 @@ func requiredComponentsForMode(mode string) ([]string, error) {
 			return component == "attestation-api"
 		}), nil
 	}
-	return defaultRequiredComponents, nil
+	return slices.Clone(defaultRequiredComponents), nil
 }
 
 // requireLabel rejects an empty or bare-wildcard label. Image and name labels
