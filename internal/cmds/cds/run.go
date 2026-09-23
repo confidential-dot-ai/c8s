@@ -102,6 +102,15 @@ func run(cfg config) error {
 	}
 	defer allowlistStore.Close()
 
+	// The coordinator is opened before anything serves: a journal that fails
+	// its chain check must stop the process, not surface later as a route that
+	// 500s.
+	coord, err := openCoordinator(coordinatorPath(cfg), cfg)
+	if err != nil {
+		return err
+	}
+	defer coord.Close()
+
 	// CDS generates its mesh CA in process at startup; the private key never
 	// touches a Kubernetes Secret.
 	mesh, err := issuer.NewCAWithCurve(cfg.caCommonName, cfg.caCertValidity, elliptic.P384())
@@ -163,10 +172,24 @@ func run(cfg config) error {
 	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
+	var seedAdded int
 	if cfg.allowlistSeed != "" {
-		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
+		seedAdded, err = seedStore(&allowlistStore, cfg.allowlistSeed)
+		if err != nil {
 			return fmt.Errorf("seed allowlist: %w", err)
 		}
+	}
+	if err := bootstrapPolicy(&allowlistStore, coord, seedAdded); err != nil {
+		return err
+	}
+	// One adapter for every reader of the effective policy: GET /allowlist,
+	// certificate issuance and secret release all see the version the
+	// coordinator has switched to, never the newest published one.
+	active := activePolicy{coordinator: coord}
+	publications := &allowlist.Publications{
+		Publisher:    policyPublisher{coordinator: coord},
+		Active:       active,
+		AuthorizedBy: publicationAuthority(operatorKeysHash),
 	}
 
 	if !cfg.allowlistPersistent {
@@ -234,7 +257,7 @@ func run(cfg config) error {
 		// One store behind both handlers: an operator write and a workload read
 		// are two doors onto the same paths.
 		store := newSecretsStore(cfg)
-		policy := secrets.NewCachedPolicy(&allowlistStore)
+		policy := secrets.NewCachedPolicy(active)
 		secretsHandler = &secrets.Handler{
 			Store:          store,
 			Challenges:     &secretsChallenges,
@@ -279,7 +302,7 @@ func run(cfg config) error {
 			ImagePins:         pinned.Images,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
-			AllowlistStore:    &allowlistStore,
+			AllowlistStore:    active,
 			PolicySnapshots:   &policySnapshotCache{},
 			SandboxDigests:    sandboxDigests,
 			InventoryHosts:    inventoryHosts,
@@ -288,6 +311,11 @@ func run(cfg config) error {
 		AllowlistHandler: allowlist.Handler{
 			Store:             &allowlistStore,
 			WriteAuthorizer:   writeAuthorizer,
+			MaxWriteBodyBytes: allowlistWriteBodyCap,
+			Publications:      publications,
+		},
+		Publication: &publicationHandler{
+			Coordinator:       coord,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),

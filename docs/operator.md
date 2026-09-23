@@ -308,7 +308,7 @@ off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
 chart-seeded component entries are unaffected — they are re-seeded and, unlike
 dynamic entries, are also admitted from the plugin's `always_allow`. The restart also resets the allowlist version counter, and
 every enforcer ignores a served version at or below the one it last applied
-(`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
+(`docs/allowlist-and-capabilities.md`, "Refresh and rollback"): a plugin
 that had applied version N stays on that policy until the restarted
 CDS counts past N again, or the plugin itself restarts.
 
@@ -433,7 +433,7 @@ still requires `--mesh-ca` (the document publishes `cds_tls.mesh_ca_url`).
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
 (unreachable/unparseable), `4` partially verified — the evidence verified, but
-a property it presents is not proven. The three partial cases today: the
+a property it presents is not proven. The four partial cases today: the
 front door's live TLS handshake presenting a serving certificate the discovery
 evidence does not attest (a WebPKI front door, whatever the document's
 `public_tls.mode` declares — the verdict keys on the handshake observed on the
@@ -444,7 +444,10 @@ endpoint clients reach), a discovery target fetched over a non-TLS connection
 mode signal, a host-served claim nothing authenticates), and attest-pq or
 saved-bundle evidence without `--mesh-ca` (the mesh chain anchors to a CA the
 responder committed into its own transcript, so which deployment the endpoint
-belongs to is not proven). JSON renders these as
+belongs to is not proven), and a policy state the responder bound that this
+run could not authenticate or prove current while no state flag asked for it
+(see below — with a state flag that is a failure, not a partial). JSON
+renders these as
 `verified: false, partial: true` with a `not_proven` list, so a gate checking
 `verified` fails closed while scripts can still tell partial from failure.
 
@@ -453,6 +456,85 @@ Caveats the output surfaces:
 - **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
   certificate key, not a per-request nonce, so it proves "this key was born in a
   TEE with this measurement" but not "freshly now" (`fresh: false`).
+
+### Which policy the deployment is enforcing
+
+A verified measurement says the router is the code you expect. It says nothing
+about the allowlist that code is applying right now. attest-pq binds that: the
+router commits the CDS-signed policy state statement and the session's policy
+**envelope** into its report_data (see
+[ratls.md](ratls.md#state-binding-which-policy-a-session-was-served-under)).
+`c8s verify` checks the signature on that statement, decides whether its
+authority may speak for the deployment, and reports what the session may
+operate under.
+
+The envelope, not the active policy, is what the verdict judges. A deployment
+part-way through an update that removes permissions advertises
+source-or-target, and a session established then may reach a workload admitted
+under either. attest-lb binds no policy state, and evidence read from a saved
+file or a serving certificate binds none either; such a verdict carries
+`policy state: not bound by this evidence source` and stands, unless a state
+flag asked for a decision only the binding can give.
+
+```bash
+# Report what the deployment is enforcing, without judging it:
+c8s verify https://router.example.com --mode attest-pq --measurements <digest>
+
+# Accept only policies you have reviewed, and keep a history checkpoint:
+c8s verify https://router.example.com --mode attest-pq --measurements <digest> \
+  --allowlist-pin sha256:<reviewed> --allowlist-pin sha256:<also-reviewed> \
+  --state-checkpoint ~/.c8s/router.checkpoint
+```
+
+**Authority.** The statement carries the public key that signed it, so it
+authenticates itself; the question is whose key that may be. `--authority
+sha256:<hex>` pins the fingerprint. Without it, a `--state-checkpoint` file
+supplies the fingerprint a previous run anchored on. Without either, `verify`
+reads it from `/.well-known/c8s/state` over the connection bound to the
+attested certificate and trusts it **for this run only**, which the verdict
+renders as trust on first use. A restarted CDS signs with a new key, so its
+fingerprint changes and every verifier re-anchors: that is a deliberate
+re-review, not a silent handoff.
+
+**Freshness.** Binding the statement proves which one the router used, not
+that it is current. `--fresh-state` (on by default) POSTs a fresh nonce to
+`/.well-known/c8s/state/challenge` and requires CDS's signed answer to name
+the same authority and a log position no older than the one the router bound.
+An answer that is ahead is fine — the journal head moves on every internal
+acknowledgement, and the envelope is what governs the session. A journal that
+went backwards, or an authority that changed under the run, fails as
+`state_race`; re-run the command.
+
+**Accepted policy.** `--allowlist-pin sha256:<hex>` (repeatable,
+comma-separated) names the policy documents you have reviewed. `--follow`
+instead accepts whatever the authenticated deployment publishes — a
+delegation, not a check, and mutually exclusive with the pins. With neither,
+the state is reported and not judged.
+
+Against those pins the verdict reports one of two outcomes:
+
+| Outcome | Meaning | Exit |
+|---|---|---|
+| `PROCEED` | every policy in the session's envelope is pinned | 0 |
+| `REFUSED` | at least one is not; the verdict names the unapproved digests | 2 |
+
+So pinning only the source refuses the source-or-target envelope an update
+advertises: review and pin the target to proceed during the rollout, or wait
+for the drain that narrows the envelope back to one policy you pinned.
+
+**History continuity.** `--state-checkpoint <file>` records the authority,
+journal head and log position of a successful run. The next run walks the
+journal back from the current head, following each entry's `parent` and
+fetching every entry by digest from `/.well-known/c8s/objects/sha256/<hex>`,
+until it reaches the checkpointed entry. A missing entry, a position that does
+not line up, a fork at the checkpointed position, or a different authority
+(`authority changed: <old> -> <new>; re-anchor`) fails. The file is written
+only after a run that passed every other check, and it is separate from the
+pins: observing a change never approves it.
+
+The existing `--allowlist` comparison against a held document is unchanged
+and independent; when both are given, both must pass.
+
 ### Trust gate: `c8s get-kubeconfig`
 
 `c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.

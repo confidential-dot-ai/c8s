@@ -14,6 +14,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"github.com/containerd/nri/pkg/api"
@@ -680,14 +681,18 @@ func mustDigest(t *testing.T, s string) types.Digest {
 	return d
 }
 
-// newCachedPlugin builds a plugin whose policy store admits wl (applied as a
-// version-1 pull) plus the config's always_allow.
+// newCachedPlugin builds a plugin whose policy store admits wl (applied as the
+// version-1 policy CDS named) plus the config's always_allow.
 func newCachedPlugin(cfg *config, wl *allowlist.Allowlist) (*plugin, *policyStore) {
 	if err := validateLabelRules(cfg.Policy.LabelRules); err != nil {
 		panic(err)
 	}
+	canonical, err := wl.Canonical()
+	if err != nil {
+		panic(err)
+	}
 	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
-	store.apply(wl, 1)
+	store.apply(wl, 1, policystate.ContentDigest(canonical))
 	p := &plugin{
 		cfg:        cfg,
 		policy:     store,

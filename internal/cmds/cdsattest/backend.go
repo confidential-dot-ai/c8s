@@ -39,8 +39,9 @@ const maxUpstreamResponseBytes = 32 << 20
 type EchoBackend struct{}
 
 var (
-	_ Backend = EchoBackend{}
-	_ Backend = (*HTTPBackend)(nil)
+	_ Backend    = EchoBackend{}
+	_ Backend    = (*HTTPBackend)(nil)
+	_ idleCloser = (*HTTPBackend)(nil)
 )
 
 // Forward implements Backend.
@@ -252,6 +253,14 @@ func (b *HTTPBackend) Forward(ctx context.Context, env types.TunnelRequest) (typ
 		Headers: responseHeaderFields(resp.Header),
 		Body:    respBody,
 	}, nil
+}
+
+// CloseIdleConnections implements idleCloser: it drops the pooled upstream
+// connections the sidecar opened for sessions the session barrier has just
+// closed, so no connection established for an old-state session survives into
+// a wider policy. In-flight requests keep their own connection.
+func (b *HTTPBackend) CloseIdleConnections() {
+	b.client.CloseIdleConnections()
 }
 
 // responseHeaderFields flattens the upstream header map into ordered pairs:

@@ -77,6 +77,8 @@ func newTestServerWith(t *testing.T, tune func(*Server)) (*Server, *httptest.Ser
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	tune(srv)
 	ts := httptest.NewServer(srv.Handler())
@@ -450,7 +452,7 @@ func TestSessionlessFloodCannotDenyALiveSession(t *testing.T) {
 // name a bucket of its own.
 func TestTunnelKeyChargesOnlyLiveSessions(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
-	srv.sessions["live"] = establishedSession{createdAt: time.Now(), lastUsed: time.Now()}
+	srv.sessions["live"] = &establishedSession{createdAt: time.Now(), lastUsed: time.Now()}
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
@@ -560,7 +562,7 @@ func TestRefusedAttestPQMintsNoEvidence(t *testing.T) {
 
 	const client = "client:203.0.113.7"
 	for i := 0; i < maxSessionsPerClient; i++ {
-		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{createdAt: time.Now(), lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), &establishedSession{createdAt: time.Now(), lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling the client to its bound: %v", err)
 		}
 	}
@@ -641,7 +643,7 @@ func TestSessionBoundHoldsUnderConcurrency(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 
 	for i := 0; i < maxSessionsPerClient-1; i++ {
-		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling to one under the bound: %v", err)
 		}
 	}
@@ -655,7 +657,7 @@ func TestSessionBoundHoldsUnderConcurrency(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				<-start
-				if err := srv.addSession(client, fmt.Sprintf("racer-%d-%d", round, i), establishedSession{lastUsed: time.Now()}); err == nil {
+				if err := srv.addSession(client, fmt.Sprintf("racer-%d-%d", round, i), &establishedSession{lastUsed: time.Now()}); err == nil {
 					accepted.Add(1)
 				}
 			}(i)
@@ -719,14 +721,14 @@ func TestSessionsAreBoundedPerClient(t *testing.T) {
 	const client = "client:203.0.113.7"
 
 	for i := 0; i < maxSessionsPerClient; i++ {
-		if err := srv.addSession(client, "session-"+strconv.Itoa(i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, "session-"+strconv.Itoa(i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d under the bound: %v", i, err)
 		}
 	}
-	if err := srv.addSession(client, "one-too-many", establishedSession{lastUsed: time.Now()}); err == nil {
+	if err := srv.addSession(client, "one-too-many", &establishedSession{lastUsed: time.Now()}); err == nil {
 		t.Fatal("a client opened more sessions than its bound")
 	}
-	if err := srv.addSession("client:198.51.100.9", "other-client", establishedSession{lastUsed: time.Now()}); err != nil {
+	if err := srv.addSession("client:198.51.100.9", "other-client", &establishedSession{lastUsed: time.Now()}); err != nil {
 		t.Fatalf("session for a client holding none: %v", err)
 	}
 }
@@ -746,7 +748,7 @@ const (
 func TestOneAddressMayHoldACrowdsWorthOfSessions(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	for i := 0; i < entitledSessions; i++ {
-		if err := srv.addSession("client:203.0.113.7", fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession("client:203.0.113.7", fmt.Sprintf("session-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d of one address: %v", i, err)
 		}
 	}
@@ -758,7 +760,7 @@ func TestTheStoresHoldAFleet(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	for i := 0; i < entitledStore; i++ {
 		client := fmt.Sprintf("client:%d", i%64)
-		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d of a fleet: %v", i, err)
 		}
 	}
@@ -775,7 +777,7 @@ func TestTheStoresHoldAFleet(t *testing.T) {
 // one in use.
 func TestEvictionPicksTheIdlestWithinAHolder(t *testing.T) {
 	now := time.Now()
-	sessions := map[string]establishedSession{
+	sessions := map[string]*establishedSession{
 		"busy":   {lastUsed: now},
 		"idle":   {lastUsed: now.Add(-time.Hour)},
 		"middle": {lastUsed: now.Add(-time.Minute)},
@@ -794,7 +796,7 @@ func TestEvictionPicksTheIdlestWithinAHolder(t *testing.T) {
 func TestFloodCannotEvictAnHonestSession(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 
-	honest := establishedSession{lastUsed: time.Now()}
+	honest := &establishedSession{lastUsed: time.Now()}
 	if err := srv.addSession("client:honest", "honest-session", honest); err != nil {
 		t.Fatal(err)
 	}
@@ -803,7 +805,7 @@ func TestFloodCannotEvictAnHonestSession(t *testing.T) {
 	warm := time.Now().Add(time.Minute)
 	for i := 1; i < maxSessions; i++ {
 		client := fmt.Sprintf("client:flooder-%d", i/maxSessionsPerClient)
-		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), establishedSession{lastUsed: warm}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), &establishedSession{lastUsed: warm}); err != nil {
 			t.Fatalf("filling the pool at %d: %v", i, err)
 		}
 	}
@@ -812,7 +814,7 @@ func TestFloodCannotEvictAnHonestSession(t *testing.T) {
 	// its own, however idle the honest session looks next to its warm ones.
 	for i := 0; i < 4*maxSessionsPerClient; i++ {
 		client := fmt.Sprintf("client:churn-%d", i/maxSessionsPerClient)
-		if err := srv.addSession(client, fmt.Sprintf("churn-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("churn-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("attacker insert %d into a full pool: %v", i, err)
 		}
 		srv.mu.Lock()
@@ -840,7 +842,7 @@ func TestFloodCannotEvictAnHonestSession(t *testing.T) {
 func fillSessions(t *testing.T, srv *Server, want int, clients func(i int) string) {
 	t.Helper()
 	for i := 0; srv.sessionCount() < want; i++ {
-		if err := srv.addSession(clients(i), fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(clients(i), fmt.Sprintf("session-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling the pool at %d: %v", i, err)
 		}
 	}
@@ -863,7 +865,7 @@ func TestFullStoreAdmitsAClientHoldingNothing(t *testing.T) {
 		return fmt.Sprintf("client:holder-%d", i/maxSessionsPerClient)
 	})
 
-	if err := srv.addSession("client:newcomer", "newcomer", establishedSession{lastUsed: time.Now()}); err != nil {
+	if err := srv.addSession("client:newcomer", "newcomer", &establishedSession{lastUsed: time.Now()}); err != nil {
 		t.Fatalf("a client holding nothing was refused by a full pool: %v", err)
 	}
 
@@ -897,7 +899,7 @@ func TestFullStoreRefusesOnceEveryHolderIsAtTheFloor(t *testing.T) {
 		t.Fatalf("pool is held by %d clients, want %d", holders, maxSessions/minShare)
 	}
 
-	if err := srv.addSession("client:newcomer", "newcomer", establishedSession{lastUsed: time.Now()}); !errors.Is(err, errStoreFull) {
+	if err := srv.addSession("client:newcomer", "newcomer", &establishedSession{lastUsed: time.Now()}); !errors.Is(err, errStoreFull) {
 		t.Fatalf("insert into a pool level at the floor: %v, want it refused", err)
 	}
 
@@ -931,7 +933,7 @@ func TestFullStoreGivesUpAnEntryOnlyFromAClientOverItsShare(t *testing.T) {
 
 	before := srv.sessionsBy.count("client:hog-0") + srv.sessionsBy.count("client:hog-1") +
 		srv.sessionsBy.count("client:hog-2") + srv.sessionsBy.count("client:hog-3")
-	if err := srv.addSession("client:newcomer", "newcomer", establishedSession{lastUsed: time.Now()}); err != nil {
+	if err := srv.addSession("client:newcomer", "newcomer", &establishedSession{lastUsed: time.Now()}); err != nil {
 		t.Fatalf("insert into a pool with a client over its share: %v", err)
 	}
 
@@ -975,7 +977,7 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 
 	const victim = "client:victim"
 	for i := 0; i < maxSessionsPerClient; i++ {
-		if err := srv.addSession(victim, fmt.Sprintf("victim-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(victim, fmt.Sprintf("victim-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("victim session %d: %v", i, err)
 		}
 	}
@@ -985,7 +987,7 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 	// may push the victim below the floor. The store settles well inside this,
 	// and every insert past that is a refusal re-asserting the same state.
 	for i := 0; i < 2*maxSessions; i++ {
-		_ = srv.addSession(fmt.Sprintf("client:churn-%d", i), fmt.Sprintf("churn-%d", i), establishedSession{lastUsed: time.Now()})
+		_ = srv.addSession(fmt.Sprintf("client:churn-%d", i), fmt.Sprintf("churn-%d", i), &establishedSession{lastUsed: time.Now()})
 
 		srv.mu.Lock()
 		held := srv.sessionsBy.count(victim)
@@ -1011,10 +1013,10 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 func TestSessionIdIsNeverOverwritten(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 
-	if err := srv.addSession("client:first", "shared-id", establishedSession{lastUsed: time.Now()}); err != nil {
+	if err := srv.addSession("client:first", "shared-id", &establishedSession{lastUsed: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.addSession("client:second", "shared-id", establishedSession{lastUsed: time.Now()}); err == nil {
+	if err := srv.addSession("client:second", "shared-id", &establishedSession{lastUsed: time.Now()}); err == nil {
 		t.Fatal("a second client took a session id already in the pool")
 	}
 
@@ -1121,7 +1123,7 @@ func TestAttestPQRefusesWhenTheClientIsAtItsBound(t *testing.T) {
 	// The bucket a request through the front door is charged to.
 	const client = "client:203.0.113.7"
 	for i := 0; i < maxSessionsPerClient; i++ {
-		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
+		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), &establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling the client to its bound: %v", err)
 		}
 	}
@@ -1218,13 +1220,13 @@ func TestSweepReleasesExpiredEntries(t *testing.T) {
 	const client = "client:203.0.113.7"
 
 	now := time.Now()
-	if err := srv.addSession(client, "idle", establishedSession{createdAt: now, lastUsed: now.Add(-2 * srv.cfg.SessionTTL)}); err != nil {
+	if err := srv.addSession(client, "idle", &establishedSession{createdAt: now, lastUsed: now.Add(-2 * srv.cfg.SessionTTL)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.addSession(client, "over-age", establishedSession{createdAt: now.Add(-srv.cfg.SessionMaxAge - time.Second), lastUsed: now}); err != nil {
+	if err := srv.addSession(client, "over-age", &establishedSession{createdAt: now.Add(-srv.cfg.SessionMaxAge - time.Second), lastUsed: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.addSession(client, "fresh", establishedSession{createdAt: now, lastUsed: now}); err != nil {
+	if err := srv.addSession(client, "fresh", &establishedSession{createdAt: now, lastUsed: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1247,7 +1249,7 @@ func TestMaintainSweepsAndStopsWithItsContext(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	srv.sweepEvery = 5 * time.Millisecond
 
-	if err := srv.addSession("client:x", "stale", establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
+	if err := srv.addSession("client:x", "stale", &establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1279,7 +1281,7 @@ func TestServeRunsMaintenance(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	srv.sweepEvery = 5 * time.Millisecond
 
-	if err := srv.addSession("client:x", "stale", establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
+	if err := srv.addSession("client:x", "stale", &establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -602,3 +602,34 @@ func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
+
+func TestValidate_Authority(t *testing.T) {
+	tests := []struct {
+		name      string
+		authority string
+		wantErr   bool
+	}{
+		{name: "unset learns the authority"},
+		{name: "pinned fingerprint", authority: "sha256:" + strings.Repeat("ab", 32)},
+		{name: "not a hash", authority: "not a fingerprint", wantErr: true},
+		{name: "wrong length", authority: "sha256:abcd", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Allowlist.Pull.Authority = tt.authority
+
+			err := cfg.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "allowlist.pull.authority") {
+					t.Fatalf("Validate() = %v, want an allowlist.pull.authority error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() = %v, want no error", err)
+			}
+		})
+	}
+}

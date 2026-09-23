@@ -126,23 +126,40 @@ func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
 	}))
 
 	for _, tc := range []struct {
-		path string
-		want int
+		method string
+		path   string
+		want   int
 	}{
-		{path: "/allowlist", want: http.StatusNoContent},
-		{path: "/allowlist/workloads/model", want: http.StatusNoContent},
-		{path: "/allowlisted", want: http.StatusNotFound},
-		{path: "/", want: http.StatusNotFound},
+		{method: http.MethodGet, path: "/allowlist", want: http.StatusNoContent},
+		{method: http.MethodGet, path: "/allowlist/workloads/model", want: http.StatusNoContent},
+		{method: http.MethodPut, path: "/allowlist/workloads/model", want: http.StatusNoContent},
+		{method: http.MethodGet, path: "/allowlisted", want: http.StatusNotFound},
+		{method: http.MethodGet, path: "/", want: http.StatusNotFound},
+
+		// The publication read surface is published; the participant writes
+		// are not, and neither is the publication head's sibling namespace.
+		{method: http.MethodGet, path: "/.well-known/c8s/objects/sha256/abc", want: http.StatusNoContent},
+		{method: http.MethodGet, path: "/.well-known/c8s/allowlist/latest", want: http.StatusNoContent},
+		{method: http.MethodGet, path: "/.well-known/c8s/state", want: http.StatusNoContent},
+		{method: http.MethodPost, path: "/.well-known/c8s/state/challenge", want: http.StatusNoContent},
+		{method: http.MethodPost, path: "/.well-known/c8s/objects/sha256/abc", want: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/.well-known/c8s/allowlist/latest", want: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/.well-known/c8s/state", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/.well-known/c8s/state/challenge", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/.well-known/c8s/allowlist/other", want: http.StatusNotFound},
+		{method: http.MethodPost, path: "/.well-known/c8s/participants/enroll", want: http.StatusNotFound},
+		{method: http.MethodPost, path: "/.well-known/c8s/participants/ack", want: http.StatusNotFound},
+		{method: http.MethodPost, path: "/.well-known/c8s/participants/complete", want: http.StatusNotFound},
 	} {
-		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req := httptest.NewRequest(tc.method, tc.path, nil)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		if rec.Code != tc.want {
-			t.Errorf("%s status = %d, want %d", tc.path, rec.Code, tc.want)
+			t.Errorf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.want)
 		}
 	}
-	if hits != 2 {
-		t.Fatalf("proxy hits = %d, want 2", hits)
+	if want := 7; hits != want {
+		t.Fatalf("proxy hits = %d, want %d", hits, want)
 	}
 }
 

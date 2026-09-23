@@ -128,6 +128,13 @@ type config struct {
 	minTCBMicrocode    uint
 	expectedRDHex      string
 
+	// Dynamic-allowlist state binding (docs/allowlist-and-capabilities.md).
+	freshState      bool
+	authority       string
+	allowlistPins   []string
+	follow          bool
+	stateCheckpoint string
+
 	output       string
 	showEvidence bool
 
@@ -178,8 +185,9 @@ Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
 unavailable (unreachable / unparseable) · 4 partially verified (the evidence
 verified, but a property it presents is not proven — the front door's live
 handshake presented a serving key the evidence does not attest, no handshake
-could be observed (a non-TLS discovery target), or a chain anchor the
-responder chose).`,
+could be observed (a non-TLS discovery target), a chain anchor the responder
+chose, or a bound policy state this run could not authenticate or prove
+current while no state flag asked for it).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -222,6 +230,11 @@ responder chose).`,
 	f.UintVar(&cfg.minTCBMicrocode, "min-tcb-microcode", 0, "minimum microcode TCB component"+tcbSNPOnly)
 	f.StringVar(&cfg.expectedRDHex, "expected-report-data", "", "hex REPORTDATA / TPM-nonce anchor override for bare evidence files (1–64 bytes, exactly as bound by the producer)")
 
+	f.StringVar(&cfg.authority, "authority", "", "the sha256:<hex> fingerprint of the Ed25519 key that may sign this deployment's policy state. Empty takes it from --state-checkpoint, or learns it over the connection bound to the attested certificate and trusts it for this run only")
+	f.BoolVar(&cfg.freshState, "fresh-state", true, "prove the bound state is current: POST a fresh nonce to /.well-known/c8s/state/challenge and require the signed answer to name the same authority and a log position no older than the one the responder bound")
+	f.StringSliceVar(&cfg.allowlistPins, "allowlist-pin", nil, "accepted policy digest as sha256:<hex> (repeatable / comma-separated): the exact policies you have reviewed. The verdict proceeds only when every digest in the session's envelope is among them. Mutually exclusive with --follow")
+	f.BoolVar(&cfg.follow, "follow", false, "accept whatever policy the authenticated deployment publishes. This delegates the policy decision to that deployment: the verdict no longer claims a bound you reviewed. Mutually exclusive with --allowlist-pin")
+	f.StringVar(&cfg.stateCheckpoint, "state-checkpoint", "", "file recording the last observed authority, journal head and log position. On the next run the journal is walked back from the head to that entry, and a missing entry, a position that does not line up, or a different authority fails. Observing a change never approves it: the file is separate from the pins and is rewritten only after a successful verification")
 	f.StringVarP(&cfg.output, "output", "o", "text", "output format: text or json")
 	f.BoolVar(&cfg.showEvidence, "show-evidence", false, "print the raw report fields")
 
@@ -355,6 +368,10 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
 func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, servedMeasurements measurementsReport, out, errOut io.Writer) int {
+	// The state policy dials CDS itself and bounds each call on its own, so
+	// it keeps the caller's context rather than sharing the verification
+	// attempt's --timeout budget with the KDS fetch below.
+	stateCtx := ctx
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -369,6 +386,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
 	applyVerdictPolicies(&oc, cfg, ev, held, opKeys, plan, servedMeasurements)
+	applyStatePolicy(stateCtx, &oc, cfg, plan, ev)
 	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
@@ -496,6 +514,8 @@ type verifyPlan struct {
 	// refValues is the parsed --measurements-config, empty when unset. It
 	// both pins the target and is compared against what the target serves.
 	refValues refvalues.ReferenceValues
+	// state is the accepted-policy configuration for the state binding.
+	state *statePolicy
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -621,6 +641,11 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, err
 	}
 
+	state, err := buildStatePolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	return &verifyPlan{
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
@@ -635,6 +660,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		meshCA:       caPool,
 		initDataHash: initDataHash,
 		refValues:    refValues,
+		state:        state,
 	}, nil
 }
 
@@ -1082,6 +1108,13 @@ type Outcome struct {
 	WorkloadAllowlistVersion string `json:"workload_allowlist_version,omitempty"`
 	WorkloadAllowlistDigest  string `json:"workload_allowlist_digest,omitempty"`
 	WorkloadNote             string `json:"workload_note,omitempty"`
+
+	// StateBinding is the binding identifier the responder served when it
+	// committed a policy state, and StateBindingNote says why none is bound.
+	// State carries the statement itself once its CDS signature verified.
+	StateBinding     string        `json:"state_binding,omitempty"`
+	StateBindingNote string        `json:"state_binding_note,omitempty"`
+	State            *StateSummary `json:"state,omitempty"`
 }
 
 // applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
@@ -1627,6 +1660,7 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	} else if oc.OperatorKeysNote != "" {
 		fmt.Fprintf(out, "  operator keys: %s\n", oc.OperatorKeysNote)
 	}
+	renderState(oc, out)
 	if !oc.Fresh {
 		fmt.Fprintf(out, "  note:         freshness NOT proven (no per-request nonce bound)\n")
 	}

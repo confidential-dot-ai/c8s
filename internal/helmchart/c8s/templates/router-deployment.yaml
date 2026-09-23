@@ -226,6 +226,21 @@ spec:
             - --mesh-identity-cert-file={{ .Values.router.tlsMountPath }}/cert.pem
             - --mesh-identity-key-file={{ .Values.router.tlsMountPath }}/key.pem
             - --mesh-identity-ca-file={{ .Values.router.tlsMountPath }}/ca.pem
+            # The v2 (state-bound) attestation binding commits the CDS-signed
+            # policy state, fetched over the same RA-TLS-pinned channel the
+            # allowlist-proxy sidecar uses. Without a CDS URL the sidecar
+            # serves the v1 bindings only.
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            {{- if .Values.cds.measurementsConfig }}
+            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- else }}
+            {{- with .Values.cds.measurements }}
+            - --cds-measurements={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ join "," . }}
+            {{- end }}
+            {{- end }}
             # Terminate over-encryption here and forward to the same workload
             # backend nginx proxies to. An http upstream is plaintext at the
             # app layer; pointed at a headless Service (an adopted workload),
@@ -287,6 +302,11 @@ spec:
             {{- if eq $publicTLSMode "acme" }}
             - name: acme-tls
               mountPath: {{ include "router.acmeCertDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.cds.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
               readOnly: true
             {{- end }}
           securityContext:

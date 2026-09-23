@@ -30,6 +30,16 @@ const (
 	ErrorCodeSecretHolderQuota = "secret_holder_quota"
 	// ErrorCodeSecretStoreFull: the store is at --secrets-max-paths.
 	ErrorCodeSecretStoreFull = "secret_store_full"
+	// ErrorCodeStateStale: the router's newest verified CDS state statement is
+	// older than --state-max-age, so it refuses to bind it into an attestation
+	// or to carry tunnel traffic under it rather than claim it still reflects
+	// the deployment. Retrying once the router reaches CDS again succeeds.
+	ErrorCodeStateStale = "state_stale"
+	// ErrorCodeStateChanged: the deployment's policy bound moved outside the
+	// envelope this session was established under. The session is gone; the
+	// client re-attests and reviews the new state rather than retrying the
+	// request.
+	ErrorCodeStateChanged = "state_changed"
 )
 
 // ErrorResponse is the body a c8s service returns with a non-2xx status: one

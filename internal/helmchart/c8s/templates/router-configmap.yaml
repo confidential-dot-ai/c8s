@@ -103,10 +103,16 @@ data:
             "" "";
             default "all";
         }
+        # POST counts as a read because the state challenge is one: it is a
+        # POST only because it carries the verifier's nonce. The publication
+        # location applies this zone alone, so a browser verifier cannot spend
+        # the operator's mutation budget; on /allowlist, where POST is not a
+        # method CDS serves, counting it here as well costs nothing.
         map $request_method $allowlist_read_rate_key {
             default "";
             GET $binary_remote_addr;
             HEAD $binary_remote_addr;
+            POST $binary_remote_addr;
         }
         limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate={{ $allowlistWriteRate }}r/s;
         limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate={{ $allowlistWriteTotalRate }}r/s;
@@ -168,6 +174,13 @@ data:
             {{- $allowlistLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
             {{- include "router.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
             {{- include "router.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
+            {{- /*
+              The publication read surface, in one regex location: a regex
+              beats the /.well-known/c8s/ prefix that serves the in-pod
+              attestation sidecar, and naming the four paths exactly is what
+              keeps the participant writes off the public front door.
+            */}}
+            {{- include "router.allowlistLocation" (merge (dict "regex" true "read" true "path" `^/\.well-known/c8s/(objects/|allowlist/latest$|state$|state/challenge$)`) $allowlistLocationArgs) | nindent 12 }}
 
             {{- end }}
             {{- range $i, $route := .Values.router.routes }}

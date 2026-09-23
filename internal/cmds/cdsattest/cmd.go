@@ -15,6 +15,8 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/c8s/internal/cdspin"
+	"github.com/confidential-dot-ai/c8s/pkg/policystateclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -35,6 +37,12 @@ type config struct {
 	sessionTTL           time.Duration
 	sessionMaxAge        time.Duration
 	readHeaderTimeout    time.Duration
+
+	// CDS policy state, bound into every attest-pq response
+	cds             cdspin.Config
+	stateRefresh    time.Duration
+	stateMaxAge     time.Duration
+	participantName string
 
 	// over-encryption backend
 	upstream           string
@@ -74,6 +82,10 @@ func NewCmd() *cobra.Command {
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "established-session idle TTL")
 	f.DurationVar(&cfg.sessionMaxAge, "session-max-age", defaultSessionMaxAge, "absolute session lifetime: a session's keys retire this long after establishment, however busy it is")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
+	cfg.cds.Flags(f)
+	f.DurationVar(&cfg.stateRefresh, "state-refresh", 10*time.Second, "how often to poll CDS for its signed policy state (requires --cds-url)")
+	f.DurationVar(&cfg.stateMaxAge, "state-max-age", defaultStateMaxAge, "how old the last verified CDS state statement may be and still be bound into an attestation, or carry tunnel traffic; past it a new attest-pq session and a tunnel request are both refused with state_stale rather than served under state this sidecar can no longer vouch for")
+	f.StringVar(&cfg.participantName, "participant-name", "", "name this ingress enrols under with CDS (requires --cds-url); empty uses the hostname. The boot key generated at startup is the identity; this only names it in the log and in CDS's participant set")
 	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Empty uses an echo backend (demo).")
 	f.StringVar(&cfg.upstreamCAFile, "upstream-ca", "", "PEM CA bundle to verify an https upstream (the mesh CA)")
 	f.StringVar(&cfg.upstreamCertFile, "upstream-cert", "", "client cert presented to an https upstream (the CDS-issued LB cert)")
@@ -136,6 +148,10 @@ func run(cfg config) error {
 		logger.Warn("no --upstream set: using echo backend (demo only)")
 	}
 
+	cache, err := newStateCacheFromConfig(cfg, logger)
+	if err != nil {
+		return err
+	}
 	srv := NewServer(Config{
 		Logger:               logger,
 		Evidence:             provider,
@@ -148,6 +164,8 @@ func run(cfg config) error {
 		Backend:              backend,
 		SessionTTL:           cfg.sessionTTL,
 		SessionMaxAge:        cfg.sessionMaxAge,
+		State:                stateProvider(cache),
+		StateMaxAge:          cfg.stateMaxAge,
 	})
 
 	addr := cfg.host + ":" + strconv.Itoa(cfg.port)
@@ -157,11 +175,68 @@ func run(cfg config) error {
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 	}
 
+	if cache != nil {
+		// The participant runs whenever CDS is configured: an ingress that
+		// binds state into attestations must also retire the sessions an
+		// update would widen before CDS switches.
+		boot, err := newBootIdentity(cfg.participantName)
+		if err != nil {
+			return err
+		}
+		cache.follow(newUpdateDriver(cache.client, srv, boot, logger).onState)
+		logger.Info("joining the CDS rollout protocol as an ingress participant",
+			"boot_id", boot.id, "name", boot.name)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cache != nil {
+		// Same context as the listener: the poller stops when the server does.
+		go cache.Run(ctx)
+	}
 
 	logger.Info("LB browser-facing endpoints listening", "addr", addr)
 	return srv.Serve(ctx, httpSrv)
+}
+
+// stateProvider adapts a possibly-nil cache to the interface, so an
+// unconfigured CDS leaves Config.State nil rather than a non-nil interface
+// holding a nil pointer.
+func stateProvider(cache *stateCache) StateProvider {
+	if cache == nil {
+		return nil
+	}
+	return cache
+}
+
+// newStateCacheFromConfig builds the CDS state poller, or returns nil when no
+// --cds-url is set: attest-pq then refuses every request with
+// binding_unavailable, since its binding is the deployment's policy state and
+// there is no unbound mode.
+func newStateCacheFromConfig(cfg config, logger *slog.Logger) (*stateCache, error) {
+	if cfg.cds.URL == "" {
+		logger.Warn("no --cds-url configured: attest-pq refuses every request with binding_unavailable; only attest-lb is served")
+		return nil, nil
+	}
+	if cfg.stateRefresh <= 0 {
+		return nil, fmt.Errorf("--state-refresh must be positive")
+	}
+	if cfg.stateMaxAge < cfg.stateRefresh {
+		return nil, fmt.Errorf("--state-max-age (%s) must be at least --state-refresh (%s), or every statement expires before it can be replaced", cfg.stateMaxAge, cfg.stateRefresh)
+	}
+	target, err := cdspin.ParseURL(cfg.cds.URL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.attestationAPIURL == "" {
+		return nil, fmt.Errorf("--cds-url requires --attestation-api-url: the CDS channel is authenticated by verifying its RA-TLS evidence")
+	}
+	httpClient, err := cfg.cds.Client(cfg.attestationAPIURL, logger)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("polling CDS for signed policy state", "cds_url", target.String(), "refresh", cfg.stateRefresh, "max_age", cfg.stateMaxAge)
+	return newStateCache(policystateclient.NewWithHTTP(target.String(), httpClient), cfg.stateRefresh, logger), nil
 }
 
 func newLogger(level string) *slog.Logger {

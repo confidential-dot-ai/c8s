@@ -71,6 +71,11 @@ const (
 // clients that ride ordinary nginx TLS. Version carries the endpoint's
 // binding identifier (BindingAttestPQ / BindingAttestLB); a client requires
 // the one its endpoint mode selects.
+//
+// attest-pq additionally binds the deployment's signed policy state, the
+// session's policy envelope and the route. attest-lb binds none of the three:
+// its traffic rides nginx TLS straight to the upstream, so this sidecar owns
+// no session to hold to an envelope and must not claim one.
 type AttestationBundle struct {
 	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
 	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
@@ -95,6 +100,30 @@ type AttestationBundle struct {
 	// IdentityProof proves possession of the mesh leaf committed by
 	// report_data, over the endpoint's transcript.
 	IdentityProof *MeshIdentityProof `json:"identity_proof,omitempty"`
+	// State (attest-pq only) is the CDS-signed policy state statement the
+	// router bound into report_data: the JSON of a policystate.SignedState.
+	// It stays raw because pkg/allowlist imports this package and
+	// pkg/policystate imports pkg/allowlist, so a typed field here would be
+	// an import cycle; a verifier strict-decodes these bytes with
+	// policystate.Decode and verifies the signature itself.
+	State json.RawMessage `json:"state,omitempty"`
+	// StateHash (attest-pq only) is policystate.StateHash of State, as the
+	// "sha256:<hex>" string the transcript frames. Informational: a verifier
+	// MUST recompute it from the served statement, exactly as it recomputes
+	// ServingLeafSHA256 from the leaf it observed.
+	StateHash string `json:"state_hash,omitempty"`
+	// Envelope (attest-pq only) is the set of policy digests this session may
+	// operate under, fixed when it was established: policystate.Bound of the
+	// statement above, sorted and deduplicated, committed by the transcript.
+	// The session survives every later state whose bound is a subset of it,
+	// so a verifier reviews these digests once instead of per request.
+	// Informational like StateHash: a verifier recomputes Bound from the
+	// served statement and requires the two to be equal.
+	Envelope []string `json:"envelope,omitempty"`
+	// Route (attest-pq only) is the workload this router forwards the
+	// session to, committed by the transcript. Empty means no route is
+	// configured, which the transcript still frames as an empty field.
+	Route string `json:"route,omitempty"`
 	// ServingLeafSHA256 (attest-lb only) is the unpadded base64url SHA-256 of
 	// the serving-leaf DER the sidecar committed into report_data.
 	// Informational: the client MUST recompute this hash from the leaf it

@@ -14,6 +14,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -38,6 +39,10 @@ type pluginConfig struct {
 	// server. `host:port` selects TCP; `unix:///path/to.sock` selects a
 	// Unix socket.
 	HealthAddr string `yaml:"health_addr"`
+	// NodeName labels this node to the CDS coordinator. Empty falls back to
+	// the hostname. It is informational: a participant is identified by its
+	// boot key, never by this name.
+	NodeName string `yaml:"node_name"`
 }
 
 // workloadClaimsConfig configures the node-CVM admission inventory
@@ -79,6 +84,12 @@ type pullConfig struct {
 	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
 	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
 	CDSRTMRs          []string      `yaml:"cds_rtmrs"`           // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+
+	// Authority pins the fingerprint (sha256:<hex>) of the key CDS signs its
+	// policy state with. Empty learns it from the first state the attested
+	// pull channel carries, and re-learns it when CDS restarts under a new
+	// key; set it to refuse an authority the operator did not approve.
+	Authority string `yaml:"authority"`
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -275,6 +286,11 @@ func (c *config) Validate() error {
 		}
 		if _, err := refvalues.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
+		}
+		if fingerprint := c.Allowlist.Pull.Authority; fingerprint != "" {
+			if _, err := policystate.ParseHash(fingerprint); err != nil {
+				return fmt.Errorf("allowlist.pull.authority: %w", err)
+			}
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {

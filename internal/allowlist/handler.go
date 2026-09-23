@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -16,6 +17,10 @@ import (
 // fits (see the cds router's allowlist write cap).
 const DefaultMaxWriteBodyBytes int64 = 64 * 1024
 
+// errAbsent is a delete of a workload the store does not hold. It travels out
+// of the mutation closure so Apply skips the publication: nothing changed.
+var errAbsent = errors.New("workload not found")
+
 // Handler holds the dependencies for allowlist HTTP handlers.
 type Handler struct {
 	Store           *Store
@@ -23,6 +28,9 @@ type Handler struct {
 	// MaxWriteBodyBytes caps mutation request bodies. Zero means
 	// DefaultMaxWriteBodyBytes; a non-positive value clamps to the default.
 	MaxWriteBodyBytes int64
+	// Publications is the coordinator behind this endpoint: it serves the
+	// active document and publishes every mutation. It is required.
+	Publications *Publications
 }
 
 // WriteAuthorizer authorizes a mutation given the raw request body, so the
@@ -30,28 +38,28 @@ type Handler struct {
 // against a different payload). Production wires operatorauth.Verifier.Authorize.
 type WriteAuthorizer func(r *http.Request, body []byte) error
 
-// HandleList handles GET /allowlist: the full allowlist document as canonical
-// JSON. Emits a weak ETag from the store version; a matching If-None-Match
-// returns 304.
+// HandleList handles GET /allowlist: the ACTIVE allowlist document as canonical
+// JSON. Emits a weak ETag from its version; a matching If-None-Match returns
+// 304.
+//
+// A published version the coordinator has not switched to is deliberately
+// invisible here. An enforcer that follows only this endpoint must never admit
+// a rule before the barrier accounting has run.
 func (h Handler) HandleList(w http.ResponseWriter, r *http.Request) {
-	doc, version, err := h.Store.LoadAll()
+	body, version, err := h.Publications.Active.ActiveBytes()
 	if err != nil {
+		slog.Error("allowlist read failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	etag := `W/"` + version + `"`
+	etag := `W/"` + strconv.FormatUint(version, 10) + `"`
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	body, err := doc.Canonical()
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
 }
@@ -70,8 +78,7 @@ func (h Handler) HandleReplaceAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.ReplaceAll(al); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	if !h.apply(w, r, func() error { return h.Store.ReplaceAll(al) }) {
 		return
 	}
 
@@ -94,12 +101,7 @@ func (h Handler) HandlePutWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := chi.URLParam(r, "name")
-	if err := h.Store.PutWorkload(name, *entry); err != nil {
-		if errors.Is(err, ErrInvalidWorkload) {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-			return
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	if !h.apply(w, r, func() error { return h.Store.PutWorkload(name, *entry) }) {
 		return
 	}
 
@@ -115,18 +117,49 @@ func (h Handler) HandleDeleteWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := chi.URLParam(r, "name")
-	found, err := h.Store.DeleteWorkload(name)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		w.WriteHeader(http.StatusNotFound)
+	ok := h.apply(w, r, func() error {
+		found, err := h.Store.DeleteWorkload(name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errAbsent
+		}
+		return nil
+	})
+	if !ok {
 		return
 	}
 
 	slog.Info("allowlist workload deleted", "name", name)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// apply runs one mutation through the publication lock and answers the failure
+// itself, so each handler is left with the success path.
+//
+// The refusal that matters is 409: a rollout is outstanding, so the store was
+// not touched and the operator repeats the whole request later.
+func (h Handler) apply(w http.ResponseWriter, r *http.Request, mutate func() error) bool {
+	err := h.Publications.Apply(h.Store, mutate)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, ErrBlocked):
+		slog.Info("allowlist write refused while a policy update is outstanding", "method", r.Method, "path", r.URL.Path)
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, errAbsent):
+		w.WriteHeader(http.StatusNotFound)
+	case errors.Is(err, ErrInvalidWorkload):
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+	case errors.Is(err, ErrNotPublished):
+		slog.Error("allowlist mutation committed but not published", "error", err)
+		http.Error(w, ErrNotPublished.Error(), http.StatusInternalServerError)
+	default:
+		slog.Error("allowlist mutation failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
+	return false
 }
 
 // authorize reads the body (capped) and runs the configured authorizer.
@@ -136,11 +169,11 @@ func (h Handler) authorize(w http.ResponseWriter, r *http.Request) ([]byte, bool
 		w.WriteHeader(http.StatusUnauthorized)
 		return nil, false
 	}
-	cap := h.MaxWriteBodyBytes
-	if cap <= 0 {
-		cap = DefaultMaxWriteBodyBytes
+	max := h.MaxWriteBodyBytes
+	if max <= 0 {
+		max = DefaultMaxWriteBodyBytes
 	}
-	body, ok := httputil.ReadCappedBody(w, r, cap)
+	body, ok := httputil.ReadCappedBody(w, r, max)
 	if !ok {
 		return nil, false
 	}

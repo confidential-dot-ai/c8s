@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -27,6 +28,8 @@ func TestAttestLBServedOnACMEFrontDoor(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -85,6 +88,8 @@ func TestAttestPQCommitsFrontDoorMode(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -109,7 +114,8 @@ func TestAttestPQCommitsFrontDoorMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := overenc.IdentityTranscriptHash(b.FrontDoorMode, ck.EncapsulationKey(), ct, sessionID, nonce, identity.leaf.Raw, identity.ca.Raw)
+	want, err := overenc.IdentityTranscriptHash(b.FrontDoorMode, ck.EncapsulationKey(), ct, sessionID, nonce,
+		identity.leaf.Raw, identity.ca.Raw, stateHashOf(t, b), boundOf(t, b), b.Route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +133,8 @@ func TestAttestPQRefusedWithoutFrontDoorMode(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

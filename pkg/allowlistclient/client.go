@@ -159,8 +159,7 @@ func (c Client) mutate(ctx context.Context, method, path string, body []byte, au
 }
 
 // VersionFromETag extracts N from a weak ETag of the form W/"N", or "" if the
-// header is missing or malformed. Exported because enforcers polling the
-// allowlist track the same counter for epoch anti-rollback.
+// header is missing or malformed. N is the active policy version.
 func VersionFromETag(etag string) string {
 	v := strings.TrimPrefix(etag, "W/")
 	v = strings.TrimPrefix(v, `"`)

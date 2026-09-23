@@ -36,6 +36,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	return httptest.NewServer(srv.Handler())
 }
@@ -96,7 +98,8 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, ck *o
 	if len(certs) != 2 {
 		t.Fatalf("bundle chain has %d certs, want leaf + issuing CA", len(certs))
 	}
-	transcript, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionID, nonce, certs[0].Raw, certs[1].Raw)
+	transcript, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionID, nonce,
+		certs[0].Raw, certs[1].Raw, stateHashOf(t, bundle), boundOf(t, bundle), bundle.Route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,6 +252,8 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 		Backend:              hb,
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -310,6 +315,8 @@ func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 		Backend:              hb,
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -378,6 +385,8 @@ func TestTunnelRejectsIdleExpiredSession(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 		SessionTTL:           time.Millisecond,
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -405,6 +414,8 @@ func TestTunnelRejectsOverAgeSession(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 		SessionTTL:           time.Minute,
 		SessionMaxAge:        50 * time.Millisecond,
 	})
@@ -542,6 +553,8 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -682,6 +695,8 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

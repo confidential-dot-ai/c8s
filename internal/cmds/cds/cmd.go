@@ -72,6 +72,7 @@ func NewCmd() *cobra.Command {
 	flags.BoolVar(&cfg.allowlistPersistent, "allowlist-persistent", false, "whether --allowlist-db is on durable storage; false makes CDS warn at startup that operator-added digests and the mesh CA do not survive a restart")
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
+	flags.StringVar(&cfg.deploymentID, "deployment-id", "", "identifier this deployment is known by in every signed policy-state statement (empty generates one and logs it). Recorded when the coordinator database beside --allowlist-db is created; a later start that configures a different value is refused")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
@@ -139,6 +140,7 @@ type config struct {
 	allowlistDB         string
 	allowlistPersistent bool
 	allowlistSeed       string
+	deploymentID        string
 	inventoryCIDRs      []string
 	operatorKeys        string
 	ratlsPlatform       string

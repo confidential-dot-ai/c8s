@@ -21,7 +21,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
+	"github.com/confidential-dot-ai/c8s/pkg/policystateclient"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
 )
@@ -457,7 +457,25 @@ func TestAllowlistPullHTTPClient_WarnsOnlyWithoutPins(t *testing.T) {
 	}
 }
 
-// --- pullInitial backoff ----------------------------------------------------
+// --- pullInitial ------------------------------------------------------------
+
+// failingSyncer follows a CDS that answers every request with a 5xx.
+func failingSyncer(t *testing.T, url string, client *http.Client) *transitionSyncer {
+	t.Helper()
+	boot, err := newBootIdentity("node-under-test")
+	if err != nil {
+		t.Fatalf("newBootIdentity: %v", err)
+	}
+	return newTransitionSyncer(transitionSyncerArgs{
+		client:   policystateclient.NewWithHTTP(url, client),
+		store:    newPolicyStore(map[string]string{}),
+		live:     newLiveInstances(),
+		boot:     boot,
+		interval: time.Hour,
+		timeout:  time.Second,
+		logger:   discardLogger(),
+	})
+}
 
 // Failed attempts must be separated by the configured startup backoff; a zero
 // gap would hammer CDS on every cold boot across the fleet.
@@ -471,14 +489,9 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: time.Second})
-	store := newPolicyStore(map[string]string{})
-
 	start := time.Now()
-	_, err := pullInitial(context.Background(), pullArgs{
-		client:      client,
-		store:       store,
-		timeout:     time.Second,
+	err := pullInitial(context.Background(), pullArgs{
+		syncer:      failingSyncer(t, srv.URL, srv.Client()),
 		pluginErrCh: make(chan error, 1),
 		logger:      discardLogger(),
 	})
@@ -488,6 +501,22 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 	// One inter-attempt gap at the default 2s backoff (with slack).
 	if elapsed := time.Since(start); elapsed < 1500*time.Millisecond {
 		t.Fatalf("attempts not separated by the startup backoff: elapsed %v", elapsed)
+	}
+}
+
+// A plugin-half death during init wraps errPluginDied so Run can treat it as
+// fatal, unlike a recoverable fetch failure that degrades to the floor.
+func TestPullInitial_PluginDeathWrapsErrPluginDied(t *testing.T) {
+	pluginErrCh := make(chan error, 1)
+	pluginErrCh <- errors.New("nri socket closed")
+
+	err := pullInitial(context.Background(), pullArgs{
+		syncer:      failingSyncer(t, "https://unused", &http.Client{}),
+		pluginErrCh: pluginErrCh,
+		logger:      discardLogger(),
+	})
+	if !errors.Is(err, errPluginDied) {
+		t.Fatalf("plugin death not classified as errPluginDied: %v", err)
 	}
 }
 

@@ -33,6 +33,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -369,11 +370,51 @@ func fakeSession(fill byte) testSession {
 	}
 }
 
+// endpointRoute is the workload the test responder forwards its sessions to.
+const endpointRoute = "api"
+
+// endpointState is the policy binding every attest-pq response in these tests
+// carries: one settled deployment under a fixed throwaway authority. It is
+// derived from a constant seed so a response body and the transcript signed
+// over it agree without threading the statement through every helper.
+func endpointState(t *testing.T) (policystate.SignedState, string, []string) {
+	t.Helper()
+	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5a}, ed25519.SeedSize))
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("seeded key is not ed25519")
+	}
+	fingerprint, err := policystate.AuthorityFingerprint(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := policystate.State{
+		Protocol:      policystate.Protocol,
+		DeploymentID:  "c8s-test",
+		Authority:     fingerprint,
+		LogHead:       "sha256:" + strings.Repeat("a", 64),
+		LogPosition:   4,
+		ActiveVersion: 2,
+		ActiveDigest:  testDigestP,
+		IssuedAt:      "2026-09-01T00:00:00Z",
+	}
+	signed, err := policystate.SignState(priv, statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := policystate.StateHash(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed, hash, policystate.Bound(statement)
+}
+
 // transcript computes the identity transcript the server would have bound for
 // this identity and session.
 func (id *endpointIdentity) transcript(t *testing.T, nonce []byte, s testSession) []byte {
 	t.Helper()
-	erd, err := overenc.IdentityTranscriptHash("cds", s.ek, s.ct, s.sid, nonce, id.leaf.Raw, id.ca.Raw)
+	_, hash, envelope := endpointState(t)
+	erd, err := overenc.IdentityTranscriptHash("cds", s.ek, s.ct, s.sid, nonce, id.leaf.Raw, id.ca.Raw, hash, envelope, endpointRoute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,6 +455,11 @@ func buildEndpointJSON(t *testing.T, id *endpointIdentity, nonce, report, vcek [
 func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []byte, evidence any, s testSession) []byte {
 	t.Helper()
 	b64u := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+	signed, hash, envelope := endpointState(t)
+	stateJSON, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp := map[string]any{
 		"version":         types.BindingAttestPQ,
 		"platform":        "snp",
@@ -423,6 +469,10 @@ func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []b
 		"xwing_ek":        b64u(s.ek),
 		"xwing_ct":        b64u(s.ct),
 		"session_id":      b64u(s.sid),
+		"state":           json.RawMessage(stateJSON),
+		"state_hash":      hash,
+		"envelope":        envelope,
+		"route":           endpointRoute,
 	}
 	if id != nil {
 		resp["cds_cert_pem"] = id.chainPEM
@@ -609,7 +659,8 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		// issuing relationship, which must fail closed.
 		other := mintEndpointIdentity(t)
 		b64u := base64.RawURLEncoding.EncodeToString
-		erd, err := overenc.IdentityTranscriptHash("cds", sess.ek, sess.ct, sess.sid, nonce, id.leaf.Raw, other.ca.Raw)
+		_, stateHash, envelope := endpointState(t)
+		erd, err := overenc.IdentityTranscriptHash("cds", sess.ek, sess.ct, sess.sid, nonce, id.leaf.Raw, other.ca.Raw, stateHash, envelope, endpointRoute)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -667,7 +718,7 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 	})
 
 	t.Run("wrong or missing version rejected (cross-endpoint responses)", func(t *testing.T) {
-		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB, "c8s/attest-pq/v2"} {
+		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB} {
 			var obj map[string]any
 			if err := json.Unmarshal(data, &obj); err != nil {
 				t.Fatal(err)
@@ -772,6 +823,15 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	}
 	leafHash := sha256.Sum256(id.leaf.Raw)
 	caHash := sha256.Sum256(id.ca.Raw)
+	signed, stateHash, envelope := endpointState(t)
+	stateJSON, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	payload := fmt.Sprintf(`{
   "version": %q,
@@ -786,7 +846,11 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
   "xwing_ek": %q,
   "xwing_ct": %q,
   "session_id": %q,
-  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q }
+  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q },
+  "state": %s,
+  "state_hash": %q,
+  "envelope": %s,
+  "route": %q
 }`,
 		types.BindingAttestPQ,
 		b64u(nonce),
@@ -795,6 +859,7 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 		id.chainPEM,
 		b64u(sess.ek), b64u(sess.ct), b64u(sess.sid),
 		b64u(leafHash[:]), b64u(caHash[:]), b64u(sig),
+		stateJSON, stateHash, envelopeJSON, endpointRoute,
 	)
 
 	ev, err := evidenceFromEndpointJSON([]byte(payload), nonce, sess.ek, "endpoint")

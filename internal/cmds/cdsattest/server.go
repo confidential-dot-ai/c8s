@@ -10,6 +10,20 @@
 // terminator sits in front of it. attest-lb binds fresh evidence to the exact
 // serving leaf for native clients that ride ordinary nginx TLS instead. See
 // c8s-verify-js/PROTOCOL.md.
+//
+// attest-pq binds the deployment's signed policy state, so it needs a CDS
+// state source: without one it refuses with binding_unavailable, and there is
+// no unbound mode. Each session is pinned to the policy envelope it was
+// established under, and the sidecar is a participant in the rollout protocol
+// — it retires the sessions an outstanding update would widen, acknowledges
+// that barrier to CDS, and reports completion once the target is in force
+// (barrier.go, transition.go).
+//
+// That barrier covers attest-pq sessions only. attest-lb traffic rides nginx
+// TLS straight to the upstream and never passes through this sidecar, so
+// attest-lb bundles carry no state binding and an attest-lb deployment gets no
+// session barrier: the sidecar does not own those sessions and must not claim
+// the stronger assurance for them.
 package cdsattest
 
 import (
@@ -98,6 +112,11 @@ const (
 	// The idle TTL alone would let whoever keeps records flowing keep one key
 	// alive indefinitely.
 	defaultSessionMaxAge = 5 * time.Hour
+	// defaultStateMaxAge is how old a cached CDS state statement may be and
+	// still be bound into an attestation. It is a small multiple of the
+	// poll interval, so a brief CDS outage does not fail the endpoint while a
+	// real one stops it claiming to know the deployment's policy.
+	defaultStateMaxAge = time.Minute
 	// attestBodyLimit bounds the attest-pq request body: a nonce and an X-Wing
 	// encapsulation key in JSON is well under 8 KiB.
 	attestBodyLimit = 8 << 10
@@ -152,9 +171,19 @@ type Config struct {
 	MeshIdentityCAFile   string
 	// ExpectedWorkload gates /readyz on the installed mesh identity leaf
 	// carrying a matched-workload stamp with this exact name. Empty keeps
-	// /readyz unconditionally 200.
+	// /readyz unconditionally 200. It is also the route attest-pq commits:
+	// it names the workload behind this front door.
 	ExpectedWorkload string
-	Backend          Backend // over-encrypted application backend (nil => EchoBackend)
+	// State supplies the CDS policy state attest-pq commits. Nil refuses
+	// attest-pq with binding_unavailable: the binding is the session's policy
+	// envelope, and there is no unbound mode to fall back to.
+	State StateProvider
+	// StateMaxAge bounds how old a cached statement may be and still be
+	// bound. Past it attest-pq and tunnel traffic are refused with
+	// state_stale rather than served under a statement the router can no
+	// longer claim reflects CDS.
+	StateMaxAge time.Duration
+	Backend     Backend // over-encrypted application backend (nil => EchoBackend)
 	// SessionTTL is the idle TTL: a session unused for this long is dropped.
 	SessionTTL time.Duration
 	// SessionMaxAge is the absolute session lifetime from establishment,
@@ -167,6 +196,21 @@ type establishedSession struct {
 	createdAt time.Time
 	lastUsed  time.Time
 	client    string
+	// envelope is the set of policy digests this session may operate under,
+	// exactly as the attestation committed it. The session continues while
+	// the deployment's bound is covered by it and is retired otherwise.
+	envelope []string
+	// inflight counts the tunnel requests currently holding the channel, and
+	// cancels holds one cancel function per such request. Removing the map
+	// entry does not stop a request that already holds the channel pointer,
+	// so retiring a session cancels these and waits for the count to fall to
+	// zero before it counts as retired (barrier.go).
+	inflight    int
+	cancels     map[uint64]context.CancelFunc
+	nextRequest uint64
+	// drained is closed when the last in-flight request of a retired session
+	// returns, and is nil while the session is live.
+	drained chan struct{}
 }
 
 // Server serves the c8s-verify endpoints.
@@ -183,8 +227,12 @@ type Server struct {
 	clientLimiter    *issuer.IPRateLimiter
 
 	mu         sync.Mutex
-	sessions   map[string]establishedSession // session id -> channel
-	sessionsBy *holders                      // client -> its session ids
+	sessions   map[string]*establishedSession // session id -> channel
+	sessionsBy *holders                       // client -> its session ids
+	// bound is the deployment's current policy bound, as the newest verified
+	// statement names it. It shares the session lock because installing a new
+	// one retires the sessions it is not covered by (barrier.go).
+	bound []string
 
 	sweepEvery time.Duration
 	evictEvery time.Duration
@@ -207,6 +255,9 @@ func NewServer(cfg Config) *Server {
 	if cfg.SessionMaxAge <= 0 {
 		cfg.SessionMaxAge = defaultSessionMaxAge
 	}
+	if cfg.StateMaxAge <= 0 {
+		cfg.StateMaxAge = defaultStateMaxAge
+	}
 	backend := cfg.Backend
 	if backend == nil {
 		backend = EchoBackend{}
@@ -221,7 +272,7 @@ func NewServer(cfg Config) *Server {
 		sweepEvery:       sweepInterval,
 		evictEvery:       limiterEvictInterval,
 		idleAfter:        limiterIdleTimeout,
-		sessions:         make(map[string]establishedSession),
+		sessions:         make(map[string]*establishedSession),
 		sessionsBy:       newHolders(),
 	}
 }
@@ -392,23 +443,27 @@ func parseAttestPQRequest(w http.ResponseWriter, r *http.Request) (req types.Att
 	return req, nonce, xwingEK
 }
 
+// rejectSelectors refuses a request that tries to negotiate a binding. Each
+// endpoint path serves exactly one transcript shape, so a client sending a
+// selector is asking for something this build does not serve and must hear the
+// 400 rather than be served silently. Presence, not value: `?pq=` is still a
+// client that thinks it selects a binding.
+func rejectSelectors(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query()
+	for _, name := range []string{"pq", "binding"} {
+		if q.Has(name) {
+			writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
+				"the "+name+" query selector is gone: the endpoint path selects the binding, and each endpoint serves one")
+			return false
+		}
+	}
+	return true
+}
+
 // attestNonce validates the attest-lb request shape and returns the decoded
-// nonce, or writes the 400 and returns nil. The endpoint takes no binding or
-// pq parameter: it serves exactly one binding, so there is nothing to
-// negotiate, and a stale query-selecting client must get a loud 400, never
-// something else than it expects.
+// nonce, or writes the 400 and returns nil.
 func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce []byte) {
 	q := r.URL.Query()
-	// Presence, not value: `?pq=` is still a client that thinks it selects a
-	// binding, and it must hear the 400 rather than be served silently.
-	if q.Has("pq") {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the pq query selector is gone: the endpoint path selects the binding")
-		return "", nil
-	}
-	if q.Has("binding") {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the attestation endpoints take no binding parameter")
-		return "", nil
-	}
 	nonceB64 = q.Get("nonce")
 	if nonceB64 == "" {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "missing nonce")
@@ -437,6 +492,9 @@ func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce
 // possession of its private key, and the session is live when the response
 // leaves; there is no second round trip.
 func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
+	if !rejectSelectors(w, r) {
+		return
+	}
 	req, nonce, xwingEK := parseAttestPQRequest(w, r)
 	if nonce == nil {
 		return
@@ -446,6 +504,14 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	client := clientBucket(r)
 	if err := s.sessionRoom(client); err != nil {
 		s.refuseSession(w, err)
+		return
+	}
+	// Also ahead of the report: a policy this front door cannot bind — no CDS
+	// configured, or a statement too old to stand behind — costs no evidence.
+	// New sessions are admitted during an update; they are simply pinned to
+	// the wider source-or-target envelope it advertises.
+	binding, ok := s.stateBinding(w)
+	if !ok {
 		return
 	}
 	if s.cfg.FrontDoorMode == "" {
@@ -475,7 +541,7 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reportData, proof, err := identity.bind(s.cfg.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce)
+	reportData, proof, err := identity.bind(s.cfg.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce, binding)
 	if err != nil {
 		s.log.Error("bind mesh identity", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "mesh identity binding failed")
@@ -497,12 +563,21 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	}
 	id := base64.RawURLEncoding.EncodeToString(sessionID)
 	now := time.Now()
-	if err := s.addSession(client, id, establishedSession{channel: channel, createdAt: now, lastUsed: now}); err != nil {
+	// The envelope stored is the one the transcript committed, not whatever
+	// the bound has become in the meantime: a session must be held to the
+	// policy set its own evidence named.
+	session := &establishedSession{
+		channel:   channel,
+		createdAt: now,
+		lastUsed:  now,
+		envelope:  binding.envelope,
+	}
+	if err := s.addSession(client, id, session); err != nil {
 		s.refuseSession(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, types.AttestationBundle{
+	bundle := types.AttestationBundle{
 		Version:       types.BindingAttestPQ,
 		Platform:      platform,
 		Generation:    generation,
@@ -514,7 +589,9 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		XWingCT:       base64.RawURLEncoding.EncodeToString(xwingCT),
 		SessionID:     id,
 		IdentityProof: proof,
-	})
+	}
+	binding.fill(&bundle)
+	writeJSON(w, http.StatusOK, bundle)
 }
 
 // handleAttestLB serves the ordinary-TLS binding: report_data commits the
@@ -525,6 +602,9 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 // stored — the client recomputes the transcript from the leaf it observed on
 // its own TLS connection and then rides that TLS.
 func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
+	if !rejectSelectors(w, r) {
+		return
+	}
 	nonceB64, nonce := attestNonce(w, r)
 	if nonce == nil {
 		return
@@ -567,7 +647,7 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	servingLeafHash := sha256.Sum256(servingLeafDER)
-	writeJSON(w, http.StatusOK, types.AttestationBundle{
+	bundle := types.AttestationBundle{
 		Version:           types.BindingAttestLB,
 		Platform:          platform,
 		Generation:        generation,
@@ -577,7 +657,8 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		FrontDoorMode:     s.cfg.FrontDoorMode,
 		IdentityProof:     proof,
 		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
-	})
+	}
+	writeJSON(w, http.StatusOK, bundle)
 }
 
 // meshIdentity loads the mesh credential set from the three files.
@@ -693,14 +774,26 @@ func (s *Server) refuseSession(w http.ResponseWriter, err error) {
 // envelope, forwards the reconstructed request to the backend (plaintext; the
 // cluster raTLS mesh wraps that hop), and seals the response back to the client.
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
-	channel := s.useSession(r.Header.Get(sessionHeader))
-	if channel == nil {
-		writeErr(w, http.StatusUnauthorized, types.ErrorCodeChannelError, "no over-encryption session")
+	// Ahead of the session lookup and of anything decrypted: a router that
+	// cannot say what policy the deployment is under carries no plaintext.
+	if !s.admitTunnel(w) {
 		return
 	}
-
-	recBytes, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	// The request's own context, cancellable by the barrier: retiring this
+	// session must stop the forward already in flight, not only remove the
+	// session from the store.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	claim, err := s.beginTunnel(r.Header.Get(sessionHeader), cancel)
 	if err != nil {
+		s.refuseTunnel(w, err)
+		return
+	}
+	defer claim.end()
+	channel := claim.session.channel
+
+	recBytes, readErr := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if readErr != nil {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "read record")
 		return
 	}
@@ -725,7 +818,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	env.Headers = setHeaderField(env.Headers, exporterHeader,
 		base64.RawURLEncoding.EncodeToString(channel.Exporter()))
 
-	resp, err := s.backend.Forward(r.Context(), env)
+	resp, err := s.backend.Forward(ctx, env)
 	if err != nil {
 		s.log.Warn("backend forward failed", "method", env.Method, "path", env.Path, "error", err)
 		resp = types.TunnelResponse{Status: http.StatusBadGateway, Body: []byte("backend error")}
@@ -756,14 +849,16 @@ func setHeaderField(fields []types.HeaderField, name, value string) []types.Head
 	return append(kept, types.HeaderField{Name: name, Value: value})
 }
 
-// sweep evicts idle and over-age established sessions.
+// sweep evicts idle and over-age established sessions. An expired session is
+// dropped, not retired: its keys are gone, but a request already inside the
+// tunnel handler has passed the policy check and finishes.
 func (s *Server) sweep() {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, v := range s.sessions {
-		if now.Sub(v.lastUsed) > s.cfg.SessionTTL || now.Sub(v.createdAt) > s.cfg.SessionMaxAge {
-			s.dropSession(k)
+	for id, sess := range s.sessions {
+		if now.Sub(sess.lastUsed) > s.cfg.SessionTTL || now.Sub(sess.createdAt) > s.cfg.SessionMaxAge {
+			s.dropSession(id)
 		}
 	}
 }
@@ -787,7 +882,7 @@ func (s *Server) sessionRoom(client string) error {
 
 // addSession stores an established channel under id. An established session is
 // never evicted for a new one; a client at its own bound is refused.
-func (s *Server) addSession(client, id string, entry establishedSession) error {
+func (s *Server) addSession(client, id string, entry *establishedSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, taken := s.sessions[id]; taken {
@@ -804,30 +899,12 @@ func (s *Server) addSession(client, id string, entry establishedSession) error {
 		s.dropSession(idlestSessionOf(s.sessions, s.sessionsBy.keys(over)))
 	}
 	entry.client = client
+	if entry.cancels == nil {
+		entry.cancels = make(map[uint64]context.CancelFunc)
+	}
 	s.sessions[id] = entry
 	s.sessionsBy.add(client, id)
 	return nil
-}
-
-// useSession returns the channel id names, refreshing its idle deadline. An
-// idle-expired or over-age session is dropped and reported as absent: use
-// refreshes the idle deadline but never the absolute one, so no amount of
-// traffic keeps one key schedule alive past SessionMaxAge.
-func (s *Server) useSession(id string) *overenc.Channel {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.sessions[id]
-	if !ok {
-		return nil
-	}
-	now := time.Now()
-	if now.Sub(entry.lastUsed) > s.cfg.SessionTTL || now.Sub(entry.createdAt) > s.cfg.SessionMaxAge {
-		s.dropSession(id)
-		return nil
-	}
-	entry.lastUsed = now
-	s.sessions[id] = entry
-	return entry.channel
 }
 
 func (s *Server) dropSession(id string) {
@@ -839,7 +916,7 @@ func (s *Server) dropSession(id string) {
 	s.sessionsBy.remove(entry.client, id)
 }
 
-func idlestSessionOf(sessions map[string]establishedSession, held map[string]struct{}) string {
+func idlestSessionOf(sessions map[string]*establishedSession, held map[string]struct{}) string {
 	var chosen string
 	var at time.Time
 	for id := range held {

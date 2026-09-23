@@ -2,6 +2,12 @@
 // publish CDS's allowlist API. The public TLS connection terminates at nginx;
 // this process establishes the second trust hop by verifying CDS's RA-TLS
 // serving certificate before forwarding the original request.
+//
+// It publishes the legacy /allowlist API and the read side of the publication
+// protocol: the content-addressed objects, the publication head, the signed
+// state and the state challenge. The participant writes under /.well-known/c8s
+// are deliberately absent — a node reaches those through the cluster network —
+// so no boot can enroll or acknowledge through the public front door.
 package allowlistproxy
 
 import (
@@ -22,6 +28,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -170,13 +177,25 @@ func parseCDSURL(raw string) (*url.URL, error) {
 	return target, nil
 }
 
+// newRouter maps the paths this proxy forwards. Everything else 404s, and a
+// method no pattern covers 405s, so a write cannot reach CDS by way of a read
+// path the front door publishes.
 func newRouter(proxy http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	// The legacy allowlist API keeps every method: operator writes arrive
+	// here carrying their own body-bound token.
 	mux.Handle("/allowlist", proxy)
 	mux.Handle("/allowlist/", proxy)
+
+	// The publication read surface. GET also answers HEAD; the challenge is a
+	// POST only because it carries a nonce.
+	mux.Handle("GET "+policystate.PathObjectPrefix, proxy)
+	mux.Handle("GET "+policystate.PathLatest, proxy)
+	mux.Handle("GET "+policystate.PathState, proxy)
+	mux.Handle("POST "+policystate.PathChallenge, proxy)
 	return mux
 }
 

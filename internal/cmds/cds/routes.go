@@ -11,6 +11,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/server"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 )
 
 // dependencies bundles everything the cds router needs.
@@ -28,6 +29,7 @@ type dependencies struct {
 	SecretsChallenges *attestation.ChallengeStore
 	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
 	SecretsExplain    *secrets.ExplainHandler  // release diagnostic; routed with SecretsHandler
+	Publication       *publicationHandler      // nil leaves the /.well-known/c8s publication and state API unrouted
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -77,11 +79,33 @@ func newRouter(deps dependencies) http.Handler {
 		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
 	}
 
+	if deps.Publication != nil {
+		mountPublication(r, deps)
+	}
+
 	r.Get("/ca", handleCA(deps.CACertPEM))
 	r.Get("/operator-keys", handleOperatorKeys(deps.OperatorKeysPEM))
 	r.Get("/measurements", handleMeasurements(deps.MeasurementsDoc))
 
 	return r
+}
+
+// mountPublication routes the publication and state API. Reads are
+// unauthenticated like /allowlist: RA-TLS authenticates CDS and every answer is
+// self-verifying. The challenge and the participant writes are metered like
+// /attest, and the participant messages are authenticated by the boot-key
+// signature the coordinator verifies. There is no operator route: the rollout
+// is automatic, driven by the allowlist mutation that published it.
+func mountPublication(r chi.Router, deps dependencies) {
+	p := deps.Publication
+	r.Get(policystate.PathObjectPrefix+"{hex}", p.handleObject)
+	r.Get(policystate.PathLatest, p.handleLatest)
+	r.Get(policystate.PathState, p.handleState)
+	r.Method(http.MethodPost, policystate.PathChallenge, deps.protected(http.HandlerFunc(p.handleChallenge)))
+
+	r.Method(http.MethodPost, policystate.PathEnroll, deps.protected(http.HandlerFunc(p.handleEnroll)))
+	r.Method(http.MethodPost, policystate.PathAck, deps.protected(http.HandlerFunc(p.handleAck)))
+	r.Method(http.MethodPost, policystate.PathComplete, deps.protected(http.HandlerFunc(p.handleComplete)))
 }
 
 // allowlistWriteBodyCap bounds an allowlist mutation body. A workload document

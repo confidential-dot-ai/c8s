@@ -11,6 +11,7 @@ Each file links to its reference below, and each reference links back to the fil
 | [Services](services/README.md) | [_services.tpl](../templates/_services.tpl) | Attestation and CDS endpoints, socket access, DNS resolver |
 | [Certificates](certificates/README.md) | [_certificates.tpl](../templates/_certificates.tpl) | Certificate sidecars, security context, DNS SAN pattern |
 | [Allowlist](allowlist/README.md) | [_allowlist.tpl](../templates/_allowlist.tpl) | Component inventory, local admission list, CDS seed |
+| [Router](router/README.md) | [router-helpers.tpl](../templates/router-helpers.tpl) | Front-door locations for the CDS allowlist and publication API, and their rate-limit zones |
 
 Keep purpose and invariant comments beside the template; keep longer contracts
 and cross-template coordination notes in these references. Documentation lives

@@ -186,12 +186,15 @@ so nginx must not normalize or replace the path before CDS verifies the token.
 The loopback proxy verifies CDS's RA-TLS evidence. Stock nginx cannot verify
 the attestation extension itself, so it must never dial CDS directly here.
 
-Args: root, exact (bool), path, proxyPort, writeBurst, writeTotalBurst,
-readBurst — the numeric args arrive pre-validated by the configmap prologue.
+Args: root, exact (bool), regex (bool), path, proxyPort, writeBurst,
+writeTotalBurst, readBurst — the numeric args arrive pre-validated by the
+configmap prologue. Set read=true for the publication surface: it carries no
+mutation, so it is metered in the read zone alone, which also covers the state
+challenge's nonce-carrying POST.
 */}}
 {{- define "router.allowlistLocation" -}}
 {{- $root := .root -}}
-location{{ if .exact }} ={{ end }} {{ .path }} {
+location{{ if .exact }} ={{ else if .regex }} ~{{ end }} {{ .path }} {
     {{- if default false $root.Values.router.cors.enabled }}
     {{- include "router.corsLocationDirectives" $root.Values.router.cors | nindent 4 }}
     {{- else if eq (include "router.protocolCorsEnabled" $root) "true" }}
@@ -200,8 +203,10 @@ location{{ if .exact }} ={{ end }} {{ .path }} {
     # These run before nginx collapses callers onto the loopback proxy source.
     # Each zone's map key is empty for the methods it does not cover, so
     # mutations count per client and in aggregate, reads per client only.
+    {{- if not (default false .read) }}
     limit_req zone=allowlist_write_per_client burst={{ .writeBurst }} nodelay;
     limit_req zone=allowlist_write_total burst={{ .writeTotalBurst }} nodelay;
+    {{- end }}
     limit_req zone=allowlist_read_per_client burst={{ .readBurst }} nodelay;
     limit_req_status 429;
     proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;

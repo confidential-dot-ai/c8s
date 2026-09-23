@@ -403,6 +403,9 @@ type channelVectors struct {
 	CADER             string              `json:"ca_der_hex"`
 	Nonce             string              `json:"nonce_hex"`
 	SessionID         string              `json:"session_id_hex"`
+	StateHash         string              `json:"state_hash"`
+	Envelope          []string            `json:"envelope"`
+	Route             string              `json:"route"`
 	TranscriptHash    string              `json:"transcript_hash_hex"`
 	C2SKey            string              `json:"c2s_key_hex"`
 	S2CKey            string              `json:"s2c_key_hex"`
@@ -453,7 +456,8 @@ func TestChannelGoldenVectors(t *testing.T) {
 	}
 
 	th, err := IdentityTranscriptHash(v.FrontDoorMode, ck.EncapsulationKey(), mustHex(t, v.XWingCT),
-		mustHex(t, v.SessionID), mustHex(t, v.Nonce), mustHex(t, v.LeafDER), mustHex(t, v.CADER))
+		mustHex(t, v.SessionID), mustHex(t, v.Nonce), mustHex(t, v.LeafDER), mustHex(t, v.CADER),
+		v.StateHash, v.Envelope, v.Route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,6 +517,18 @@ func TestChannelGoldenVectors(t *testing.T) {
 	}
 }
 
+// The policy binding the golden vector frames. The digests are placeholders:
+// the vector pins the transcript encoding, not a real deployment's policy.
+const (
+	vectorStateHash = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	vectorRoute     = "api"
+)
+
+var vectorEnvelope = []string{
+	"sha256:3333333333333333333333333333333333333333333333333333333333333333",
+	"sha256:4444444444444444444444444444444444444444444444444444444444444444",
+}
+
 // writeChannelVectors regenerates the vector file. Only the server-side
 // encapsulation draws randomness; everything else is derived.
 func writeChannelVectors(t *testing.T) {
@@ -532,7 +548,8 @@ func writeChannelVectors(t *testing.T) {
 	leafDER, caDER := []byte("leaf-der"), []byte("ca-der")
 	nonce := bytes.Repeat([]byte{0x33}, 32)
 	sessionID := bytes.Repeat([]byte{0x44}, SessionIDBytes)
-	th, err := IdentityTranscriptHash("cds", ck.EncapsulationKey(), ct, sessionID, nonce, leafDER, caDER)
+	th, err := IdentityTranscriptHash("cds", ck.EncapsulationKey(), ct, sessionID, nonce, leafDER, caDER,
+		vectorStateHash, vectorEnvelope, vectorRoute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +575,7 @@ func writeChannelVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := channelVectors{
-		Description:       "c8s attest-pq v1 channel golden vector: X-Wing decapsulation from seed, identity transcript, HKDF schedule, one record per direction. Shared verbatim with c8s-verify-js.",
+		Description:       "c8s attest-pq channel golden vector: X-Wing decapsulation from seed, identity transcript (policy state, session envelope and route included), HKDF schedule, one record per direction. Shared verbatim with c8s-verify-js.",
 		FrontDoorMode:     "cds",
 		XWingSeed:         hex.EncodeToString(seed),
 		XWingEK:           hex.EncodeToString(ck.EncapsulationKey()),
@@ -568,6 +585,9 @@ func writeChannelVectors(t *testing.T) {
 		CADER:             hex.EncodeToString(caDER),
 		Nonce:             hex.EncodeToString(nonce),
 		SessionID:         hex.EncodeToString(sessionID),
+		StateHash:         vectorStateHash,
+		Envelope:          vectorEnvelope,
+		Route:             vectorRoute,
 		TranscriptHash:    hex.EncodeToString(th),
 		C2SKey:            hex.EncodeToString(keys.c2sKey),
 		S2CKey:            hex.EncodeToString(keys.s2cKey),

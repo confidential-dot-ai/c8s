@@ -2953,6 +2953,11 @@ func TestRouterCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	}
 }
 
+// publicationLocation is the single regex location the router publishes the
+// CDS publication read surface on. Naming the four paths exactly is what keeps
+// the participant writes off the public front door.
+const publicationLocation = `^/\.well-known/c8s/(objects/|allowlist/latest$|state$|state/challenge$)`
+
 // protocolCORSLocations are the c8s protocol-owned nginx locations that serve
 // wide-open CORS by default: their responses are self-authenticating or
 // public by design, and browser verifiers on any origin must be able to
@@ -2960,6 +2965,7 @@ func TestRouterCORSAllowsSessionHeaderByDefault(t *testing.T) {
 var protocolCORSLocations = []struct{ match, path string }{
 	{"exact", "/allowlist"},
 	{"prefix", "/allowlist/"},
+	{"regex", publicationLocation},
 	{"exact", "/v1/discovery"},
 	{"exact", "/.well-known/cds-cert.pem"},
 	{"exact", "/.well-known/mesh-ca.pem"},
@@ -3057,6 +3063,10 @@ func TestRouterExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	readMap.assertDirective(t, "default", `""`)
 	readMap.assertDirective(t, "GET", "$binary_remote_addr")
 	readMap.assertDirective(t, "HEAD", "$binary_remote_addr")
+	// The state challenge is a read that has to be a POST: it carries the
+	// verifier's nonce, so the read key covers POST and the publication
+	// location meters it there rather than in the operator's write budget.
+	readMap.assertDirective(t, "POST", "$binary_remote_addr")
 
 	for _, route := range []struct {
 		match string
@@ -3074,6 +3084,19 @@ func TestRouterExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=40", "nodelay")
 		location.assertDirective(t, "limit_req_status", "429")
 		location.assertNoDirective(t, "proxy_ssl_verify")
+	}
+
+	// One regex location carries the whole publication read surface, metered
+	// in the read zone alone. It beats the /.well-known/c8s/ prefix that
+	// serves the in-pod attestation sidecar.
+	publication := cfg.location(t, "regex", publicationLocation)
+	publication.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
+	publication.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=40", "nodelay")
+	publication.assertNoDirective(t, "limit_req_zone")
+	for _, zone := range publication.directives["limit_req"] {
+		if len(zone) > 0 && zone[0] != "zone=allowlist_read_per_client" {
+			t.Errorf("publication location meters %s, want the read zone only", zone[0])
+		}
 	}
 
 	proxy := renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy")
@@ -3389,8 +3412,12 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 			}
 			if len(fields) >= 2 && fields[0] == "location" {
 				key := nginxLocationKey{match: "prefix", path: fields[1]}
-				if len(fields) == 3 && fields[1] == "=" {
-					key = nginxLocationKey{match: "exact", path: fields[2]}
+				if len(fields) == 3 && (fields[1] == "=" || fields[1] == "~") {
+					match := "exact"
+					if fields[1] == "~" {
+						match = "regex"
+					}
+					key = nginxLocationKey{match: match, path: fields[2]}
 				}
 				cfg.locations[key] = block
 			}

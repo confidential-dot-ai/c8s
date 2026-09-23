@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,36 @@ const (
 	digestA       = "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	digestMissing = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
+
+// storeBacked keeps the active document equal to the store's, so the handler
+// tests below exercise the HTTP layer rather than a rollout: every mutation is
+// visible on the next read.
+type storeBacked struct{ store *allowlist.Store }
+
+func (s storeBacked) CanPublish() error                { return nil }
+func (s storeBacked) Publish(_ []byte, _ string) error { return nil }
+
+func (s storeBacked) ActiveBytes() ([]byte, uint64, error) {
+	doc, version, err := s.store.LoadAll()
+	if err != nil {
+		return nil, 0, err
+	}
+	body, err := doc.Canonical()
+	if err != nil {
+		return nil, 0, err
+	}
+	n, err := strconv.ParseUint(version, 10, 64)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, n, nil
+}
+
+// publicationsFor wires a handler to its own store.
+func publicationsFor(store *allowlist.Store) *allowlist.Publications {
+	backed := storeBacked{store: store}
+	return &allowlist.Publications{Publisher: backed, Active: backed, AuthorizedBy: "test"}
+}
 
 // testOperatorCredential generates an operator key pair: a Signer for minting
 // write tokens and the public key CDS would pin.
@@ -79,6 +110,7 @@ func testAllowlistApp(t *testing.T) (http.Handler, *readiness.Checker, *operator
 	wh := allowlist.Handler{
 		Store:           &store,
 		WriteAuthorizer: operatorauth.Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: 30 * time.Second}.Authorize,
+		Publications:    publicationsFor(&store),
 	}
 
 	return allowlistTestRouter(wh, checker.Ready), &checker, signer
@@ -213,7 +245,7 @@ func guardTestHandler(t *testing.T) (allowlist.Handler, *allowlist.Store) {
 	if err != nil {
 		t.Fatalf("open in-memory store: %v", err)
 	}
-	h := allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }}
+	h := allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: publicationsFor(&store)}
 	return h, &store
 }
 
@@ -388,6 +420,7 @@ func TestWorkloadPutRejectsBodyOverConfiguredCap(t *testing.T) {
 		Store:             &store,
 		WriteAuthorizer:   operatorauth.Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: 30 * time.Second}.Authorize,
 		MaxWriteBodyBytes: 64,
+		Publications:      publicationsFor(&store),
 	}
 	srv := httptest.NewServer(allowlistTestRouter(wh, checker.Ready))
 	defer srv.Close()
@@ -595,7 +628,7 @@ func TestAllowlistWritesRejectedWithoutAuthorizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open in-memory store: %v", err)
 	}
-	h := allowlist.Handler{Store: &store}
+	h := allowlist.Handler{Store: &store, Publications: publicationsFor(&store)}
 
 	body := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestA)
 	rec := httptest.NewRecorder()
@@ -641,7 +674,7 @@ func TestAllowlistHandlersReturn500OnStoreFailure(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	h := allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }}
+	h := allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: publicationsFor(&store)}
 
 	cases := []struct {
 		name    string

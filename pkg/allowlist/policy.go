@@ -2,8 +2,18 @@ package allowlist
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+)
+
+// Roles of a container inside a workload entry. The role is part of a rule's
+// identity: moving a container between the init and main lists changes when
+// its permissions apply.
+const (
+	RoleInit = "init"
+	RoleMain = "main"
 )
 
 // Index answers admission queries for enforcers in O(1). Build it once, from a
@@ -11,18 +21,37 @@ import (
 // nil *Index admits nothing, so an enforcer with no policy yet can query it
 // without a guard.
 type Index struct {
-	byDigest map[string][]Container
+	byDigest map[string][]Match
+}
+
+// Match names the declared rule that admits an observation: the entry it came
+// from, the container list (role) it was declared in, the container policy
+// itself, and the entry's secret grant. An enforcer needs all four to name the
+// rule a running instance was admitted under.
+type Match struct {
+	Workload  string
+	Role      string
+	Container Container
+	Secrets   *SecretsPolicy
 }
 
 // BuildIndex projects an Allowlist into an admission index.
+//
+// Entries are walked in name order so the candidate list of a digest two
+// entries share is the same on every node: MatchContainer returns the first
+// candidate that admits, and nodes must agree on which rule that is.
 func (a *Allowlist) BuildIndex() *Index {
-	idx := &Index{byDigest: map[string][]Container{}}
-	for _, w := range a.Workloads {
-		for _, c := range w.InitContainers {
-			idx.byDigest[c.Digest.String()] = append(idx.byDigest[c.Digest.String()], c)
-		}
-		for _, c := range w.Containers {
-			idx.byDigest[c.Digest.String()] = append(idx.byDigest[c.Digest.String()], c)
+	idx := &Index{byDigest: map[string][]Match{}}
+	for _, name := range slices.Sorted(maps.Keys(a.Workloads)) {
+		w := a.Workloads[name]
+		for _, list := range []struct {
+			role       string
+			containers []Container
+		}{{RoleInit, w.InitContainers}, {RoleMain, w.Containers}} {
+			for _, c := range list.containers {
+				d := c.Digest.String()
+				idx.byDigest[d] = append(idx.byDigest[d], Match{Workload: name, Role: list.role, Container: c, Secrets: w.Secrets})
+			}
 		}
 	}
 	return idx
@@ -38,7 +67,7 @@ func (a *Allowlist) BuildIndex() *Index {
 // does not normalize is skipped and named in warnings, which leaves the caller
 // to decide whether a single bad entry is fatal.
 func DigestIndex(digests []string) (*Index, []error) {
-	idx := &Index{byDigest: map[string][]Container{}}
+	idx := &Index{byDigest: map[string][]Match{}}
 	var warnings []error
 	for _, raw := range digests {
 		d, err := types.NormalizeDigest(raw)
@@ -46,11 +75,11 @@ func DigestIndex(digests []string) (*Index, []error) {
 			warnings = append(warnings, fmt.Errorf("skip digest %q: %w", raw, err))
 			continue
 		}
-		idx.byDigest[d.String()] = []Container{{
+		idx.byDigest[d.String()] = []Match{{Container: Container{
 			Digest:  d,
 			Command: ArgvPolicy{Policy: PolicyAny},
 			Args:    ArgvPolicy{Policy: PolicyAny},
-		}}
+		}}}
 	}
 	return idx, warnings
 }
@@ -83,20 +112,32 @@ func (i *Index) AdmitsDigest(digest string) bool {
 // the union across every entry that lists the digest: the observation must
 // satisfy some declared container's argv, mount and env policy together.
 func (i *Index) AdmitsContainer(r RunningContainer) bool {
+	_, ok := i.MatchContainer(r)
+	return ok
+}
+
+// MatchContainer returns the rule that admits r, or ok false when none does.
+// It is AdmitsContainer with the winning candidate named, which is what an
+// enforcer needs to record what an instance was admitted under; the bool
+// contract of AdmitsContainer stays as it was.
+//
+// A digest listed by several entries has several candidates. The first that
+// admits wins, in the deterministic order BuildIndex established.
+func (i *Index) MatchContainer(r RunningContainer) (Match, bool) {
 	if i == nil {
-		return false
+		return Match{}, false
 	}
 	d, err := types.ParseDigest(r.Digest)
 	if err != nil {
-		return false
+		return Match{}, false
 	}
 	r.Digest = d.String()
-	for _, c := range i.byDigest[d.String()] {
-		if c.admits(r) {
-			return true
+	for _, m := range i.byDigest[r.Digest] {
+		if m.Container.admits(r) {
+			return m, true
 		}
 	}
-	return false
+	return Match{}, false
 }
 
 // matchCommand matches a command policy against the front of argv. exact pins a
@@ -162,8 +203,8 @@ func (i *Index) AdmitsProcess(r RunningContainer) bool {
 		return false
 	}
 	r.Digest = d.String()
-	for _, c := range i.byDigest[r.Digest] {
-		if c.admitsProcess(r) {
+	for _, m := range i.byDigest[r.Digest] {
+		if m.Container.admitsProcess(r) {
 			return true
 		}
 	}

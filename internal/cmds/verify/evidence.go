@@ -13,11 +13,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
+	"github.com/confidential-dot-ai/c8s/pkg/policystate"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -112,6 +115,35 @@ type evidence struct {
 	// workloadErr records a carried matched-workload extension this build
 	// cannot interpret (or a duplicate). The verdict fails closed on it.
 	workloadErr error
+	// bindingVersion is the binding identifier the responder served
+	// (types.BindingAttestPQ), empty for cert-sourced evidence.
+	bindingVersion string
+	// state is the CDS-signed policy statement the attest-pq transcript
+	// committed, nil for an evidence source that binds none. Whether its
+	// authority may speak for the deployment is settled by the state policy
+	// (statepolicy.go); the signature under the carried key is checked here.
+	state *boundState
+	// route is the workload the transcript committed as this session's
+	// destination, empty when the responder forwards to none.
+	route string
+	// stateNote says why no state is bound.
+	stateNote string
+	// stateFetchCert is the hex SHA-256 of a certificate this evidence
+	// attests, which a follow-up fetch to the same origin can be pinned to:
+	// the serving certificate in cert and discovery modes, the
+	// transcript-committed mesh leaf on attest-pq. On a front door that
+	// serves some other leaf the pinned fetch then fails closed rather than
+	// trusting whatever the door presents.
+	stateFetchCert string
+}
+
+// boundState is the policy statement the transcript committed, with the hash
+// and envelope the transcript actually framed — both recomputed from the
+// statement, never read off the response.
+type boundState struct {
+	signed   policystate.SignedState
+	hash     string
+	envelope []string
 }
 
 // platformOrDefault returns p, or "snp" when p is empty (the historical default
@@ -139,6 +171,10 @@ type attestationResponse struct {
 	XWingCT       string                   `json:"xwing_ct"`
 	SessionID     string                   `json:"session_id"`
 	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
+	State         json.RawMessage          `json:"state"`
+	StateHash     string                   `json:"state_hash"`
+	Envelope      []string                 `json:"envelope"`
+	Route         string                   `json:"route"`
 }
 
 // leafTrust is what a caller can offer to authenticate a leaf body that is
@@ -265,6 +301,7 @@ func evidenceFromCert(cert *x509.Certificate, source string, trust leafTrust) (*
 		fresh:             false,
 		source:            source,
 		certSHA256:        hex.EncodeToString(sum[:]),
+		stateFetchCert:    hex.EncodeToString(sum[:]),
 		bindingNote:       binding,
 		leaf:              cert,
 		leafBody:          body,
@@ -292,6 +329,13 @@ func insecureClient(serverName string, timeout time.Duration) *http.Client {
 // REPORTDATA to the complete key exchange + session id + nonce (a freshness
 // proof). The keypair is discarded — this verifier never opens the channel.
 func gatherFromEndpoint(ctx context.Context, base, serverName string, timeout time.Duration) (*evidence, error) {
+	return attestPQ(ctx, base, serverName, timeout)
+}
+
+// attestPQ runs one attest-pq exchange. There is nothing to negotiate: the
+// endpoint serves one transcript shape, and it always commits the deployment's
+// policy state.
+func attestPQ(ctx context.Context, base, serverName string, timeout time.Duration) (*evidence, error) {
 	nonce := make([]byte, nonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
@@ -325,7 +369,8 @@ func gatherFromEndpoint(ctx context.Context, base, serverName string, timeout ti
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, &connectError{err: fmt.Errorf("POST %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))}
+		detail := fmt.Sprintf("POST %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &connectError{err: errors.New(detail)}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -346,9 +391,9 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 	// This parser consumes exactly the attest-pq binding. Anything else —
 	// including the retired "c8s-verify/v1" tag or a cross-endpoint attest-lb
 	// response — is rejected even if its evidence is otherwise valid: the
-	// endpoints are non-negotiated and there is no downgrade.
+	// endpoint path is not negotiated and there is no downgrade.
 	if r.Version != types.BindingAttestPQ {
-		return nil, fmt.Errorf("attestation response version %q is not the attest-pq binding %q", r.Version, types.BindingAttestPQ)
+		return nil, fmt.Errorf("attestation response version %q is not the attest-pq binding (%q)", r.Version, types.BindingAttestPQ)
 	}
 	if len(r.Evidence) == 0 {
 		return nil, fmt.Errorf("attestation response carries no evidence")
@@ -389,10 +434,19 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 	if err != nil {
 		return nil, err
 	}
+	state, err := boundStateFromResponse(r)
+	if err != nil {
+		return nil, err
+	}
 	// The transcript rejects wrong-size keys and nonces: report_data framing is
 	// length-prefixed, so a wrong-size field can never reproduce the served
 	// hash — refuse it here instead of failing report-data match downstream.
-	erd, err := overenc.IdentityTranscriptHash(r.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce, leaf.Raw, ca.Raw)
+	//
+	// The hash and the envelope come from the served statement, not from the
+	// response's own fields: values the responder chose would let it name one
+	// policy in the transcript and ship another.
+	erd, err := overenc.IdentityTranscriptHash(r.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce,
+		leaf.Raw, ca.Raw, state.hash, state.envelope, r.Route)
 	if err != nil {
 		return nil, fmt.Errorf("compute identity transcript: %w", err)
 	}
@@ -414,13 +468,15 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 	// --mesh-ca / --workload enforce them downstream exactly as in cert modes.
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
+	bindingNote := "REPORTDATA binds the identity transcript: front-door mode + session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified), plus the CDS policy state H(S), this session's policy envelope and the selected route"
+	leafSum := sha256.Sum256(leaf.Raw)
 	return &evidence{
 		platform:         platformOrDefault(r.Platform),
 		rawEvidence:      r.Evidence,
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
-		bindingNote:      "REPORTDATA binds the identity transcript: front-door mode + session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		bindingNote:      bindingNote,
 		leaf:             leaf,
 		leafChainDerived: true,
 		frontDoor:        frontDoorNone,
@@ -428,7 +484,47 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 		sandboxErr:       sandboxErr,
 		workload:         workload,
 		workloadErr:      workloadErr,
+		bindingVersion:   r.Version,
+		state:            state,
+		route:            r.Route,
+		// The mesh leaf is what this evidence attests, and in the cds
+		// front-door mode it is also the leaf nginx serves. Where it is not,
+		// a fetch pinned to it fails rather than trusting the door.
+		stateFetchCert: hex.EncodeToString(leafSum[:]),
 	}, nil
+}
+
+// boundStateFromResponse decodes the statement the response carries, checks
+// the CDS signature on it, and recomputes the hash and envelope the transcript
+// frames. The served state_hash and envelope are informational and are
+// compared, not trusted: a responder that names one policy and ships another
+// is caught here rather than at the report-data compare.
+//
+// Whether the authority that signed may speak for this deployment is a
+// separate question, settled by the state policy (statepolicy.go).
+func boundStateFromResponse(r attestationResponse) (*boundState, error) {
+	if len(r.State) == 0 {
+		return nil, &securityError{err: fmt.Errorf("the %s binding carries no state statement", r.Version)}
+	}
+	var signed policystate.SignedState
+	if err := policystate.Decode(r.State, &signed); err != nil {
+		return nil, fmt.Errorf("parse the bound state statement: %w", err)
+	}
+	if err := policystate.VerifySignedState(signed); err != nil {
+		return nil, &securityError{err: fmt.Errorf("the bound state statement is not signed by the authority it names: %w", err)}
+	}
+	hash, err := policystate.StateHash(signed.Statement)
+	if err != nil {
+		return nil, fmt.Errorf("hash the bound state statement: %w", err)
+	}
+	if r.StateHash != "" && r.StateHash != hash {
+		return nil, &securityError{err: fmt.Errorf("the response reports state_hash %s but the statement it carries hashes to %s", r.StateHash, hash)}
+	}
+	envelope := policystate.Bound(signed.Statement)
+	if len(r.Envelope) != 0 && !slices.Equal(r.Envelope, envelope) {
+		return nil, &securityError{err: fmt.Errorf("the response advertises the envelope %v but the statement it carries bounds %v", r.Envelope, envelope)}
+	}
+	return &boundState{signed: signed, hash: hash, envelope: envelope}, nil
 }
 
 // committedMeshChain parses the served mesh chain and returns the leaf plus
@@ -583,13 +679,15 @@ func evidenceFromBareJSON(data []byte, erd []byte, source string) (*evidence, er
 }
 
 // joinAttestationURL appends the well-known attestation path to a base URL
-// (scheme + host[:port]). The challenge travels in the POST body.
+// (scheme + host[:port]). The challenge travels in the POST body and there is
+// no query parameter: the path selects the binding, and there is one binding.
 func joinAttestationURL(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("parse url %q: %w", base, err)
 	}
 	u.Path = attestationPath
+	u.RawQuery = ""
 	return u.String(), nil
 }
 

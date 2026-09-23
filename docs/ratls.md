@@ -721,6 +721,147 @@ The one canonical encoding of `{v1, "api", "7", 0x11×32}` is pinned as a
 golden vector in `pkg/ratls/matchedworkload_test.go` and shared with the other
 parsers so they cannot drift.
 
+## State binding: which policy a session was served under
+
+The matched-workload stamp above says which allowlist entry CDS decided a
+peer's leaf against *at issuance*. It does not say what the deployment is
+enforcing now. attest-pq adds that: the router commits the CDS-signed policy
+state statement `S`, the session's policy **envelope** and the route it
+forwards to into the same report_data the session already binds. A verifier
+therefore learns which statement the front door was using, and which set of
+policies this session may operate under.
+
+### The attest-pq transcript
+
+`pkg/overenc` frames it with `LP(x)` = `uint32_be(len(x)) || x`:
+
+```text
+attest-pq = SHA-384( LP("c8s-verify/v1") || LP(mode) ||
+                     LP(SHA-256(mesh_CA_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
+                     LP(xwing_ek) || LP(xwing_ct) || LP(session_id) || LP(nonce) ||
+                     LP(state_hash) || LP(envelope_json) || LP(route) )
+```
+
+The three trailing fields are the policy binding:
+
+- `state_hash` is `policystate.StateHash(S)` as its `sha256:<hex>` **string
+  bytes**, not the decoded digest.
+- `envelope_json` is `policystate.Bound(S)` — the sorted, deduplicated policy
+  digests — encoded as its JSON array, exactly as `overenc.EncodeEnvelope`
+  produces it (for example
+  `["sha256:1111…","sha256:2222…"]`, with no spaces).
+- `route` is the workload the router forwards the session to (the sidecar's
+  `--expected-workload`). It is length-prefixed even when empty, so "no route"
+  is a field rather than a shorter transcript.
+
+The response carries `state`, `state_hash`, `envelope` and `route` beside the
+evidence. The last three are informational: a verifier recomputes the hash and
+the bound from the served statement and requires the served fields to match,
+exactly as it recomputes `serving_leaf_sha256` from the leaf it observed.
+
+**attest-lb is unchanged and carries no policy binding.** Its transcript is
+the v1 field list, byte for byte, and its bundle has no `state`, `state_hash`,
+`envelope` or `route`. attest-lb traffic rides nginx TLS straight to the
+upstream and never passes through the sidecar, so the sidecar owns no session
+to hold to an envelope and must not claim the barrier below for one. An
+attest-lb deployment gets no session barrier at all.
+
+### When it is served
+
+There is nothing to negotiate: the endpoint path selects the transcript, and
+attest-pq always binds the policy. A request carrying a `binding` or `pq`
+query selector is a `400 invalid_request`, never a silent downgrade.
+
+The `cds-attest` sidecar needs `--cds-url` and polls CDS for `S` over an
+RA-TLS-pinned channel (`--cds-measurements` / `--measurements-config`, the
+same pins `allowlist-proxy` takes). **There is no unbound mode**: without a
+state source attest-pq serves nothing. Two refusals, distinct so a client can
+tell a deployment shape from an outage:
+
+| Condition | Response |
+|---|---|
+| no `--cds-url` | `501 binding_unavailable` |
+| nothing verified yet, or the cached statement is older than `--state-max-age` (default 60s) | `503 state_stale` |
+
+A refusal costs no attestation report. The sidecar never binds a statement
+whose signature it did not verify: `S` carries the authority's public key, the
+sidecar checks that the key's fingerprint is the authority the statement names
+and that the signature holds, and the RA-TLS pin on the CDS channel is what
+authenticates where that statement came from. A restarted CDS signs with a new
+key, so the authority fingerprint changes; the sidecar follows it and logs the
+change, and every verifier re-anchors on it.
+
+### The session barrier
+
+Binding H(S) says which policy a session started under. It does not stop that
+session outliving the policy, so the sidecar is also a participant in the CDS
+rollout protocol. It enrols under a per-process boot key
+(`--participant-name` names it in the log; the key is the identity), and every
+attest-pq session is pinned to the **envelope** its own attestation committed:
+`policystate.Bound(S)` at establishment.
+
+The rule is one line: a session continues while the deployment's current bound
+is a **subset** of its envelope.
+
+- A settled deployment bounds one policy, and a session established under it
+  carries that one digest.
+- A publication that removes permissions widens the bound to source-or-target
+  until the drain completes. A session established during it carries **both**
+  digests, so it survives the switch and the later `drained` that narrows the
+  bound back to the target. Nothing forces it to re-attest.
+- A session that carries the source alone no longer covers the widened bound.
+  The next tunnel request on it answers `409 state_changed` and the session is
+  dropped.
+- Enrollments, acknowledgements and drain reports move the log head without
+  moving the bound, so a session never dies because another participant
+  acknowledged.
+
+What a client sees, on both `/.well-known/c8s/attest-pq` and
+`/.well-known/c8s/tunnel`:
+
+| Condition | Response | What the client does |
+|---|---|---|
+| the bound left this session's envelope | `409 state_changed` | re-attest and review the new envelope before resending |
+| the last verified statement is older than `--state-max-age` | `503 state_stale` | retry; established sessions survive the window |
+
+New sessions are **not** refused during an update: they are admitted under the
+wider source-or-target envelope, and a client that has reviewed both policies
+proceeds without waiting.
+
+When an update is outstanding and not yet switched, the sidecar runs its
+barrier: it retires every session whose envelope does not cover the new bound,
+which means cancelling that session's in-flight tunnel requests and waiting
+for them to return, dropping the session, and closing the pooled backend
+connections their plaintext rode. Only then does it `Ack` to CDS with the
+number of sessions it retired. Removing a map entry is not enough — a request
+already inside the handler holds the channel pointer — so the acknowledgement
+covers operations that have stopped. CDS switches only once every frozen
+participant has acknowledged, so no source-only session is open when the
+target becomes usable. After the switch the sidecar reports `Complete`
+immediately: an ingress holds no instances.
+
+There is no fence. An unreachable participant blocks completion, which is the
+design's deliberate trade (`DESIGN2.md`, "Simplifications").
+
+### What H(S) proves, and what it does not
+
+It proves **which** statement the router used for this session — the statement
+is in the response and its hash is in the hardware report, so neither can be
+swapped afterwards. It does **not** prove that statement is current: an
+honest but partitioned router can freshly attest stale state.
+
+Currency needs a second exchange: the verifier POSTs its own nonce to
+`/.well-known/c8s/state/challenge` and requires CDS's signed answer to name
+the same authority and a log position no older than the one the router bound.
+That is what `c8s verify --fresh-state` does (on by default); a journal that
+went backwards, or an authority that changed under the run, fails as
+`state_race` rather than passing on the older statement. An answer that is
+*ahead* is fine: the head moves on every acknowledgement, and the session's
+envelope is what governs what it may reach. The verifier policies built on top
+— reviewed policy pins, the two outcomes, and the history checkpoint — are
+documented under [Verifying attestation after
+install](operator.md#verifying-attestation-after-install).
+
 ## Operation on confidential nodes
 
 The node is the TEE boundary: its components share its attested identity.

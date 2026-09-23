@@ -284,22 +284,65 @@ short-lived token bound to the exact method, path, and body (so a captured token
 cannot be replayed against a different payload) and CDS verifies it against the
 operator public keys it pins.
 
-### Refresh and anti-rollback
+### Refresh and rollback
 
-Consumers poll `GET /allowlist` and refresh on a changed version (the ETag
-counter). The served document **swaps wholesale, gated by a monotonic epoch**
-(the version counter): a consumer applies a pulled document only if its version
-is greater than the last applied, and ignores a regression. This matters because
-policy can *tighten* (narrow `args`, revoke a `secrets` grant, remove an entry);
-a plain additive merge would let a host that withholds an update keep a laxer
-policy live forever. Epoch-gated replacement makes a withheld or rolled-back
-update fail toward the last-known-good policy, not toward the laxest one; a CDS
-outage degrades to "stale", never to "open". The high-water-mark is
-process-local, so this rejects rollback only within a consumer's lifetime: after
-a restart the first version seen is
-trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
-attested freshness / monotonic-counter mechanism the host cannot reset — a
-tracked follow-on.
+Enforcers do not poll `GET /allowlist`. They follow the CDS-signed state
+statement (next section) and apply only the policy object it names, fetched by
+content digest. There is no version high-water mark on the node: a withheld or
+stale statement leaves the applied policy in place, so a CDS outage degrades
+to "stale", never to "open". A CDS whose state is restored from an older
+snapshot is not detectable by the node — see [publication and the
+coordinator](#publication-the-coordinator-and-the-journal).
+
+### Enforcer updates
+
+The node follows a CDS-signed *state* statement at `/.well-known/c8s/state`.
+The statement names the active policy digest and, while a publication rolls
+out, the one outstanding update. The node applies the policy object that digest
+names, fetched from `/.well-known/c8s/objects/sha256/<hex>` and re-hashed
+against the digest it asked for before it is parsed.
+
+What the node does in each phase:
+
+- **No update.** It applies the policy the state names as active and drops the
+  pending set the finished update left behind.
+- **Update, not switched.** The target authorizes nothing yet. The node closes
+  an admission barrier — no container create is decided while it is closed —
+  marks the running containers whose admitting rule the target no longer grants
+  *pending*, and acknowledges to CDS with their count. A container is retired by
+  any narrowing of the rule that admitted it: a removed entry, a pinned command,
+  a dropped mount or environment value, a revoked secret grant. Its image
+  staying allowlisted does not save it. A container created after the
+  acknowledgement is still admitted by the source policy, and joins the pending
+  set if the target drops its rule.
+- **Switched.** The coordinator has authorized the target, which it does once
+  every frozen participant acknowledged. The node applies it — the only step
+  that widens what may run. A node that enrolled after the freeze, and so
+  acknowledged nothing, marks its own retired containers pending first.
+- **Drain.** Pending containers keep running: `Synchronize` leaves them alone
+  even though the applied policy no longer admits them, and they are not
+  restarted or re-admitted — a *new* container matching only a removed rule is
+  refused like any other. When the last pending container is gone, the node
+  posts its completion; an update that retired nothing here is completed at
+  once.
+
+Each node joins as a **participant** with a boot key generated at process
+start. A plugin restart is therefore a new participant that re-enrols, and the
+pending set does not survive it: CDS keeps the old boot outstanding until it
+completes, and an unreachable participant blocks the update rather than being
+dropped from it. An enrollment that arrives while an update is outstanding is
+refused with 409 and retried on the next poll, so a joining node never serves as
+a participant the update did not freeze. Set `plugin.node_name` to label the
+node; the boot key, not the name, is the identity.
+
+The **authority** is the fingerprint of the key CDS signs state with. The node
+learns it from the first statement the attested pull channel carries, and
+re-learns it only when it changes *and* the new statement verifies under the key
+it carries — what a CDS restart looks like, since the signing key is generated
+in memory and never persisted. Re-learning it re-enrols the node: the restarted
+CDS knows nothing of this boot. `allowlist.pull.authority` pins the fingerprint
+(`sha256:<hex>`); with it set, a statement from any other authority is refused
+and the node keeps enforcing what it has applied.
 
 Each enforcer also carries a **local seed** that admits by digest alone ahead of
 the served document and is never touched by a pull: the host NRI plugin's
@@ -307,6 +350,135 @@ the served document and is never touched by a pull: the host NRI plugin's
 `bootstrapAllowlist.workloads` container admitted under any command and args).
 That is what lets a node enforce at t=0 offline and bring the platform's own images
 up before CDS is reachable.
+
+## Publication, the coordinator and the journal
+
+CDS records every allowlist change in an append-only journal and serves a signed
+statement of what is in force. A write no longer takes effect the moment it
+lands: it is **published**, and the coordinator **switches** enforcement to it
+once every participant has a barrier in place. That split is what lets a rollout
+account for instances still running under the policy being replaced.
+
+Nothing in it is operator-driven. There is one outstanding update at a time,
+from the write that published it to the last participant's completion, and the
+coordinator moves it along as the acknowledgements arrive.
+
+### Terms
+
+| Term | Meaning |
+| --- | --- |
+| Version | The publication counter. It increases on every write; it says what exists, not what is enforced. |
+| Active version | The version enforcement uses. `GET /allowlist` serves it, a certificate is stamped with it, and a secret is released against it. |
+| Policy digest | SHA-256 of the canonical policy bytes. It is what a verifier pins. |
+| Authority | The fingerprint of the key CDS signs state with. It is generated in memory at startup, so a restart is a new authority and every verifier re-anchors. |
+| Log position | The position in the journal. It is dense and 1-based, so a gap is detectable. |
+| Update | One move from the active policy to a published target. Only one may be outstanding. |
+| Bound | The policy digests a participant on the protected path may still be executing under — what a verifier accepts or refuses. |
+
+### Two events
+
+The journal carries two event types, and a verifier needs no others to read the
+bound:
+
+- **`published`** records a target policy, the source it replaces, and whether
+  retiring the source needs a drain (`requires_drain` is true when the target
+  drops a rule the source granted). From here the bound is source-or-target: the
+  publication announces potential exposure before any target-only permission can
+  be used. It is not a claim that the target runs anywhere.
+- **`drained`** records that every participant applied the target and nothing
+  still holds a permission only the source granted. The bound narrows to the
+  target. An additions-only update never emits one: its bound was the target
+  from publication.
+
+### Endpoints
+
+Reads need no authorization; the RA-TLS channel authenticates CDS and every
+answer is self-verifying.
+
+| Route | Answer |
+| --- | --- |
+| `GET /.well-known/c8s/objects/sha256/<hex>` | The exact stored bytes of one object: a policy document or a journal entry. |
+| `GET /.well-known/c8s/allowlist/latest` | Publication head: authority, version, policy digest, log head. |
+| `GET /.well-known/c8s/state` | The signed state statement. |
+| `POST /.well-known/c8s/state/challenge` | The statement bound to a caller's nonce, for strict freshness. |
+
+Nodes post their own boot-key-signed messages to
+`/.well-known/c8s/participants/{enroll,ack,complete}`. Those are not operator
+routes, and the router's public front door does not publish them.
+
+### The rollout
+
+1. **Publish.** An allowlist write stores the resulting document as an object,
+   appends `published`, and freezes the participant set that must acknowledge:
+   every boot enrolled at that moment. Admission, issuance and secret release do
+   not move.
+2. **Switch.** When every frozen participant has acknowledged its barrier, the
+   active version becomes the target. With nothing enrolled that happens in the
+   publishing transaction itself.
+3. **Complete.** When every frozen participant reports the target applied and
+   nothing left holding a retired permission, CDS appends `drained` if the
+   update needed one, and releases the single-update lock.
+
+A second write while an update is outstanding is refused with `409` and **does
+not touch the store**, so the operator repeats the whole request once the
+rollout finishes. An enrollment during an update is refused the same way, and
+the joining node retries on its next poll: a boot the freeze never captured must
+not serve as a participant CDS is waiting on.
+
+### First start
+
+On its first start CDS publishes the installed allowlist as version 1. Nothing
+has enrolled yet, so it switches and completes at once and a fresh cluster is
+never left with a policy that exists and enforces nothing. A restart whose seed
+adds entries publishes the result as the next version, rolled out like any
+other.
+
+There is no import path. A start that finds entries in the allowlist store and
+an empty journal fails closed: publishing them would record a history no
+operator authorized. Start from an empty store, or seed one with
+`--allowlist-seed`.
+
+### Rolling out a change
+
+Write the entry the way you always have. Publication and rollout follow from it:
+
+```sh
+c8s allowlist apply entry.json
+curl -s https://cds.example:8443/.well-known/c8s/state
+```
+
+The statement's `update` is `null` once the rollout is over. While it is
+outstanding, `switched` says whether admission has moved to the target, and
+`requires_drain` says whether the bound still covers both policies. A write that
+answers `409` means a previous one has not finished.
+
+### When a node does not answer
+
+An unreachable participant blocks completion, and so blocks the next
+publication. That is deliberate: there is no fence. Removing a node from
+Kubernetes or from a registry cannot assert that its workloads stopped, and a
+timeout cannot either, so CDS keeps the old permissions in the advertised bound
+and refuses another update rather than emitting a drain nobody proved. Every
+acknowledgement that leaves a participant outstanding is logged at warn, naming
+it. Recovering from a node that will never answer means rebuilding the
+deployment.
+
+### Storage
+
+The journal lives in its own SQLite database beside `--allowlist-db`, as
+`coordinator.db`. It holds the objects, the journal index, the deployment id and
+the coordinator's private participant and update state — never the signing key,
+which is generated in memory at startup and never written anywhere.
+
+CDS verifies the whole chain at startup and refuses to start on a journal that
+does not recompute, or on private state that disagrees with the journal head.
+There is no repair path: serving from a modified history would tell verifiers
+something that never happened.
+
+A restored database snapshot is not detectable from inside CDS. The chain proves
+that what a client sees continues the history it already saw; proving that no
+other branch existed needs the independent authority witness the design calls
+for, which is not wired yet.
 
 ## Bootstrap
 

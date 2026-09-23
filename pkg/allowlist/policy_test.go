@@ -135,3 +135,99 @@ func TestIndex_NilAdmitsNothing(t *testing.T) {
 		t.Fatal("a nil *Index must admit nothing and report size 0")
 	}
 }
+
+func TestIndex_MatchContainerNamesTheAdmittingRule(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"api":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"exact","argv":["--serve"]}}],
+		       "initContainers":[{"digest":"`+digestB+`","command":{"policy":"exact","argv":["/migrate"]},"args":{"policy":"deny"}}],
+		       "secrets":{"policy":"allow","read":["/api/**"]}}}}`)
+	idx := al.BuildIndex()
+
+	tests := []struct {
+		name         string
+		running      RunningContainer
+		wantMatch    bool
+		wantRole     string
+		wantSecrets  bool
+		wantWorkload string
+	}{
+		{
+			name:         "main container",
+			running:      RunningContainer{Digest: digestA, Argv: []string{"/app", "--serve"}},
+			wantMatch:    true,
+			wantRole:     RoleMain,
+			wantSecrets:  true,
+			wantWorkload: "api",
+		},
+		{
+			name:         "init container",
+			running:      RunningContainer{Digest: digestB, Argv: []string{"/migrate"}},
+			wantMatch:    true,
+			wantRole:     RoleInit,
+			wantSecrets:  true,
+			wantWorkload: "api",
+		},
+		{
+			name:    "argv the entry does not permit",
+			running: RunningContainer{Digest: digestA, Argv: []string{"/bin/sh"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			match, ok := idx.MatchContainer(tt.running)
+			if ok != tt.wantMatch {
+				t.Fatalf("MatchContainer(%v) = _, %v, want %v", tt.running.Argv, ok, tt.wantMatch)
+			}
+			if ok != idx.AdmitsContainer(tt.running) {
+				t.Fatal("MatchContainer and AdmitsContainer disagree")
+			}
+			if !ok {
+				return
+			}
+			if match.Workload != tt.wantWorkload || match.Role != tt.wantRole {
+				t.Fatalf("match = (%s, %s), want (%s, %s)", match.Workload, match.Role, tt.wantWorkload, tt.wantRole)
+			}
+			if (match.Secrets != nil) != tt.wantSecrets {
+				t.Fatalf("match.Secrets = %v, want secrets %v", match.Secrets, tt.wantSecrets)
+			}
+			if match.Container.Digest.String() != tt.running.Digest {
+				t.Fatalf("match.Container.Digest = %s, want %s", match.Container.Digest, tt.running.Digest)
+			}
+		})
+	}
+}
+
+// Two entries listing one digest must resolve the same way on every node:
+// enforcers name the rule an instance was admitted under, and a map-order
+// winner would make that name a local accident.
+func TestIndex_MatchContainerPicksTheSameEntryEveryTime(t *testing.T) {
+	doc := `{"schema":"c8s.allowlist/v1","workloads":{
+		"beta":{"containers":[{"digest":"` + digestA + `","command":{"policy":"any"},"args":{"policy":"any"}}]},
+		"alpha":{"containers":[{"digest":"` + digestA + `","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`
+	running := RunningContainer{Digest: digestA, Argv: []string{"/app"}}
+
+	for range 20 {
+		match, ok := mustParse(t, doc).BuildIndex().MatchContainer(running)
+		if !ok {
+			t.Fatal("digest listed by two entries was not admitted")
+		}
+		if match.Workload != "alpha" {
+			t.Fatalf("MatchContainer picked %q, want the first entry in name order (alpha)", match.Workload)
+		}
+	}
+}
+
+func TestIndex_DigestIndexMatchesWithoutARule(t *testing.T) {
+	idx, warnings := DigestIndex([]string{digestA})
+	if len(warnings) != 0 {
+		t.Fatalf("DigestIndex warnings = %v, want none", warnings)
+	}
+	match, ok := idx.MatchContainer(RunningContainer{Digest: digestA, Argv: []string{"/anything"}})
+	if !ok {
+		t.Fatal("a bare digest index must admit the digest under any argv")
+	}
+	if match.Workload != "" || match.Role != "" {
+		t.Fatalf("match = (%q, %q), want an unnamed rule: a bootstrap digest belongs to no entry", match.Workload, match.Role)
+	}
+}

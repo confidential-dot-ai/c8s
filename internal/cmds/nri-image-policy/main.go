@@ -1,7 +1,7 @@
 // Package nriimagepolicy is an NRI plugin that validates container images
-// against a digest allowlist. Every plugin polls a remote CDS service (pull
-// mode) for the allowlist, with a bootstrap file on disk (always_allow) as the
-// cold-boot baseline.
+// against a digest allowlist. Every plugin follows the signed policy state a
+// remote CDS serves (pull mode), with a bootstrap file on disk (always_allow)
+// as the cold-boot baseline.
 package nriimagepolicy
 
 import (
@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,9 +24,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/internal/version"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/policystateclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -39,11 +38,7 @@ var (
 	allowlistApiInitialDelay = 2 * time.Second
 )
 
-var (
-	errInitialAllowlistNotModified = errors.New("initial allowlist fetch returned not modified without a cached CDS allowlist")
-	errInitialAllowlistNil         = errors.New("initial allowlist fetch returned nil allowlist")
-	errPluginDied                  = errors.New("NRI plugin died during allowlist init")
-)
+var errPluginDied = errors.New("NRI plugin died during allowlist init")
 
 func startupSourceMode(cfg *config) string {
 	if cfg.PullEnabled() {
@@ -109,19 +104,32 @@ func Run(args []string) error {
 
 	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
 
-	var wlClient allowlistclient.Client
-	if cfg.PullEnabled() {
-		logger.Info("initializing allowlist client", "url", cfg.Allowlist.Pull.URL)
-		httpClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
-		if err != nil {
-			return fmt.Errorf("create allowlist client: %w", err)
-		}
-		wlClient = allowlistclient.NewClientWithHTTP(cfg.Allowlist.Pull.URL, httpClient)
-	}
-
 	plugin, err := newPlugin(cfg, resolver, store, auditLogger, logger)
 	if err != nil {
 		return fmt.Errorf("create plugin: %w", err)
+	}
+
+	var syncer *transitionSyncer
+	if cfg.PullEnabled() {
+		logger.Info("initializing the policy-state client", "url", cfg.Allowlist.Pull.URL)
+		pullClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
+		if err != nil {
+			return fmt.Errorf("create policy-state client: %w", err)
+		}
+		boot, err := newBootIdentity(cfg.Plugin.NodeName)
+		if err != nil {
+			return err
+		}
+		syncer = newTransitionSyncer(transitionSyncerArgs{
+			client:   policystateclient.NewWithHTTP(cfg.Allowlist.Pull.URL, pullClient),
+			store:    store,
+			live:     plugin.live,
+			boot:     boot,
+			pinned:   cfg.Allowlist.Pull.Authority,
+			interval: cfg.Allowlist.Pull.Interval,
+			timeout:  cfg.Allowlist.Pull.Timeout,
+			logger:   logger,
+		})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -176,12 +184,9 @@ func Run(args []string) error {
 		}
 	}
 
-	var initialETag string
-	if cfg.PullEnabled() {
-		initialETag, err = pullInitial(ctx, pullArgs{
-			client:      wlClient,
-			store:       store,
-			timeout:     cfg.Allowlist.Pull.Timeout,
+	if syncer != nil {
+		err = pullInitial(ctx, pullArgs{
+			syncer:      syncer,
 			pluginErrCh: pluginErrCh,
 			logger:      logger,
 		})
@@ -202,10 +207,10 @@ func Run(args []string) error {
 			case errors.Is(err, errPluginDied):
 				return err
 			default:
-				// The cache already holds the bootstrap floor (always_allow), so
+				// The store already holds the bootstrap floor (always_allow), so
 				// stay up serving it rather than crash-loop the plugin and block
-				// container creation node-wide. runPullLoop keeps retrying.
-				logger.Warn("initial allowlist pull failed; serving bootstrap floor and retrying in background", "error", err)
+				// container creation node-wide. The state loop keeps retrying.
+				logger.Warn("initial policy pull failed; serving bootstrap floor and retrying in background", "error", err)
 			}
 		}
 	}
@@ -213,15 +218,8 @@ func Run(args []string) error {
 	plugin.SetReady()
 	logger.Info("plugin ready")
 
-	if cfg.PullEnabled() {
-		go runPullLoop(ctx, pullLoopArgs{
-			client:   wlClient,
-			store:    store,
-			interval: cfg.Allowlist.Pull.Interval,
-			timeout:  cfg.Allowlist.Pull.Timeout,
-			etag:     initialETag,
-			logger:   logger,
-		})
+	if syncer != nil {
+		go syncer.Run(ctx)
 	}
 
 	plugin.RunDeferredCheck(ctx)
@@ -264,131 +262,46 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 }
 
 type pullArgs struct {
-	client      allowlistclient.Client
-	store       *policyStore
-	timeout     time.Duration
+	syncer      *transitionSyncer
 	pluginErrCh <-chan error
 	logger      *slog.Logger
 }
 
-// pullInitial fetches the startup allowlist with bounded retries and
-// returns the response ETag for the steady-state poll loop.
+// pullInitial brings the node to the policy the CDS-signed state names, with
+// bounded retries, before the plugin reports ready.
 //
-// INVARIANT: a nil error return means args.store holds the pulled document.
+// INVARIANT: a nil error return means the store holds a CDS-verified policy.
 // Context cancellation surfaces as ctx.Err(); callers must not mark the
 // plugin ready on that path.
-func pullInitial(ctx context.Context, args pullArgs) (string, error) {
+func pullInitial(ctx context.Context, args pullArgs) error {
 	delay := allowlistApiInitialDelay
 	for attempt := 1; attempt <= allowlistApiMaxRetries; attempt++ {
 		select {
 		case err := <-args.pluginErrCh:
-			return "", fmt.Errorf("%w: %w", errPluginDied, err)
+			return fmt.Errorf("%w: %w", errPluginDied, err)
 		case <-ctx.Done():
-			args.logger.Info("shutdown requested during allowlist init")
-			return "", ctx.Err()
+			args.logger.Info("shutdown requested during policy init")
+			return ctx.Err()
 		default:
 		}
 
-		reqCtx, reqCancel := context.WithTimeout(ctx, args.timeout)
-		args.logger.Info("fetching initial allowlist from CDS", "attempt", attempt)
-		wl, etag, notModified, err := args.client.Fetch(reqCtx, "")
-		reqCancel()
+		args.logger.Info("fetching the initial policy state from CDS", "attempt", attempt)
+		err := args.syncer.syncState(ctx)
 		if err == nil {
-			if notModified {
-				err = errInitialAllowlistNotModified
-			} else if wl == nil {
-				err = errInitialAllowlistNil
-			} else {
-				version := parseVersion(etag)
-				args.store.apply(wl, version)
-				args.logger.Info("initial allowlist pulled from CDS",
-					"workloads", len(wl.Workloads),
-					"version", version,
-					"etag", etag,
-				)
-				return etag, nil
-			}
+			return nil
 		}
-
-		args.logger.Error("allowlist fetch failed", "attempt", attempt, "error", err)
 		if attempt >= allowlistApiMaxRetries {
-			return "", fmt.Errorf("allowlist fetch failed after %d attempts: %w", allowlistApiMaxRetries, err)
+			return fmt.Errorf("policy state sync failed after %d attempts: %w", allowlistApiMaxRetries, err)
 		}
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			args.logger.Info("shutdown requested during allowlist init")
-			return "", ctx.Err()
+			args.logger.Info("shutdown requested during policy init")
+			return ctx.Err()
 		}
 		delay *= 2
 	}
-	return "", nil
-}
-
-type pullLoopArgs struct {
-	client   allowlistclient.Client
-	store    *policyStore
-	interval time.Duration
-	timeout  time.Duration
-	etag     string
-	logger   *slog.Logger
-}
-
-// runPullLoop polls CDS with If-None-Match. 200 rebuilds the index from the
-// pulled document and advances the ETag — unless the pulled version is below the applied
-// one (epoch rollback), which is ignored so the ETag keeps re-fetching until a
-// forward version arrives. 304 and errors leave the index untouched.
-func runPullLoop(ctx context.Context, args pullLoopArgs) {
-	ticker := time.NewTicker(args.interval)
-	defer ticker.Stop()
-
-	etag := args.etag
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		reqCtx, cancel := context.WithTimeout(ctx, args.timeout)
-		wl, newETag, notModified, err := args.client.Fetch(reqCtx, etag)
-		cancel()
-		if err != nil {
-			args.logger.Warn("pull loop fetch failed", "error", err)
-			continue
-		}
-		if notModified {
-			args.logger.Debug("pull loop: not modified", "etag", etag)
-			continue
-		}
-		if wl == nil {
-			args.logger.Warn("pull loop fetch returned nil allowlist")
-			continue
-		}
-		version := parseVersion(newETag)
-		if !args.store.apply(wl, version) {
-			args.logger.Warn("pull loop: ignoring rolled-back allowlist; keeping current index",
-				"pulled_version", version, "etag", newETag)
-			continue
-		}
-		etag = newETag
-		args.logger.Info("pull loop: allowlist refreshed",
-			"workloads", len(wl.Workloads),
-			"version", version,
-			"etag", etag,
-		)
-	}
-}
-
-// parseVersion extracts the monotone counter N from a weak ETag W/"N" — the CDS
-// mutation counter used for epoch anti-rollback. An unparseable ETag yields 0,
-// which can only be rejected as a rollback once a real version has been applied.
-func parseVersion(etag string) uint64 {
-	n, err := strconv.ParseUint(allowlistclient.VersionFromETag(etag), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
+	return nil
 }
 
 type healthServerConfig struct {

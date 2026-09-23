@@ -127,12 +127,15 @@ func writeTestPEM(t *testing.T, path, blockType string, der []byte) {
 func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	provider := &capturingProvider{}
+	state := freshStateProvider(t)
 	srv := NewServer(Config{
 		Evidence:             provider,
 		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                state,
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -161,7 +164,8 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantReportData, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionIDRaw, nonce, identity.leaf.Raw, identity.ca.Raw)
+	wantReportData, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionIDRaw, nonce,
+		identity.leaf.Raw, identity.ca.Raw, stateHashOf(t, bundle), boundOf(t, bundle), bundle.Route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +213,7 @@ func validAttestPQBody(t *testing.T) []byte {
 }
 
 func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
-	srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: types.FrontDoorModeCDS})
+	srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: types.FrontDoorModeCDS, State: freshStateProvider(t), StateMaxAge: time.Minute})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	resp := postAttestPQ(t, ts.URL, validAttestPQBody(t))
@@ -226,6 +230,8 @@ func TestIdentityBoundAttestationFailsClosedOnInvalidConfiguredIdentity(t *testi
 		MeshIdentityCertFile: "/does/not/exist/cert.pem",
 		MeshIdentityKeyFile:  "/does/not/exist/key.pem",
 		MeshIdentityCAFile:   "/does/not/exist/ca.pem",
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -430,9 +436,10 @@ func writeExpiredCAMeshIdentity(t *testing.T) testMeshIdentity {
 	return identity
 }
 
-// The endpoints take no pq or binding parameter: each path serves exactly one
-// binding and there is nothing to negotiate. Any such param — even one naming
-// the served binding — must get a loud 400 invalid_request on every route,
+// The endpoint path selects the transcript shape, and the only thing a client
+// may negotiate is its version (binding=v2, TestBindingParamAcceptsOnlyV2).
+// Every other selector — the retired pq parameter, an unknown or empty
+// binding value — must get a loud 400 invalid_request on every route,
 // including the retired /attestation path.
 func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
@@ -444,6 +451,8 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -505,6 +514,8 @@ func TestIdentityBoundAttestationRejectsDegenerateKey(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

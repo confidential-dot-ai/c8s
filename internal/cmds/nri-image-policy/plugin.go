@@ -38,30 +38,45 @@ const (
 )
 
 // policySnapshot is an immutable admission view: an Index built from the
-// last-applied CDS pull, tagged with that pull's version (the ETag counter).
-// Swapped as a unit; policyStore checks always_allow ahead of it.
+// policy object the CDS-signed state named, tagged with that policy's
+// published version and digest. Swapped as a unit; policyStore checks
+// always_allow ahead of it.
+//
+// doc is the document the index was built from, kept so an update can diff it
+// against its target. The startup snapshot names no policy, so its digest is
+// empty.
 type policySnapshot struct {
 	index   *allowlist.Index
+	doc     *allowlist.Allowlist
 	version uint64
+	digest  string
 }
 
-// policyStore holds the current admission snapshot. A single writer (the pull
+// policyStore holds the current admission snapshot. A single writer (the state
 // loop) swaps it via apply; CreateContainer reads it concurrently via current.
 // The always_allow digests are checked ahead of every snapshot, so a failed or
 // withheld pull never drops them.
+//
+// barrier is the update barrier: admission takes it for read for the whole
+// span from reading the snapshot to recording what was admitted, and a swap
+// takes it for write. A create in flight across a swap is therefore evaluated
+// against exactly one snapshot, and the pending set an update acknowledges
+// covers every container admitted before it.
 type policyStore struct {
 	alwaysAllow *allowlist.Index // digests admitted by digest alone
+	barrier     sync.RWMutex
 	snap        atomic.Pointer[policySnapshot]
 }
 
-// newPolicyStore seeds the store with an empty snapshot (version 0) so admission
-// enforces always_allow alone before the first pull lands and after any pull
-// failure. Config validation has already rejected a malformed digest, so
+// newPolicyStore seeds the store with an empty snapshot (version 0, no digest)
+// so admission enforces always_allow alone before the first pull lands and
+// after any pull failure. Config validation has already rejected a malformed digest, so
 // DigestIndex's warnings cannot fire here.
 func newPolicyStore(alwaysAllow map[string]string) *policyStore {
 	idx, _ := allowlist.DigestIndex(slices.Collect(maps.Keys(alwaysAllow)))
 	s := &policyStore{alwaysAllow: idx}
-	s.snap.Store(&policySnapshot{index: (&allowlist.Allowlist{}).BuildIndex()})
+	empty := &allowlist.Allowlist{}
+	s.snap.Store(&policySnapshot{index: empty.BuildIndex(), doc: empty})
 	return s
 }
 
@@ -72,6 +87,18 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
+// enter holds the update barrier open for one admission decision and
+// returns the snapshot that decision must use together with the release the
+// caller defers. A nil store yields a nil snapshot and a no-op release, which
+// is what the checks already treat as "no policy".
+func (s *policyStore) enter() (*policySnapshot, func()) {
+	if s == nil {
+		return nil, func() {}
+	}
+	s.barrier.RLock()
+	return s.snap.Load(), s.barrier.RUnlock
+}
+
 // alwaysAllows reports whether the digest is admitted by digest alone.
 func (s *policyStore) alwaysAllows(digest string) bool {
 	if s == nil {
@@ -80,24 +107,33 @@ func (s *policyStore) alwaysAllows(digest string) bool {
 	return s.alwaysAllow.AdmitsDigest(digest)
 }
 
-// apply installs the pulled document at version, unless version is below the
-// applied one — an epoch rollback a withheld/rolled-back CDS must not use to
-// loosen a tightened policy. Reports whether it applied. Single-writer: only the
-// pull loop calls it, so the read-compare-store needs no lock against other
-// writers.
+// apply installs the document served for digest at its published version,
+// closing the admission barrier so the swap is invisible to a decision in
+// flight.
 //
-// The applied version is process-local (newPolicyStore starts at 0), so
-// rollback is only rejected within a process lifetime: after a restart the first
-// pull is trusted, whatever its version, and state re-syncs from CDS. Surviving a
-// restart would need a monotonic counter the host cannot reset — out of scope; on
-// the untrusted host a persisted file is itself host-controlled. See
-// docs/allowlist-and-capabilities.md.
-func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
-	if cur := s.snap.Load(); cur != nil && version < cur.version {
-		return false
-	}
-	s.snap.Store(&policySnapshot{index: pulled.BuildIndex(), version: version})
-	return true
+// The applied policy is whatever the verified state names: the state is signed
+// by the authority and fetched over the attested pull channel, so a document
+// that reaches here has already been authenticated, and there is no local
+// counter for a rolled-back CDS to trip over.
+func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64, digest string) {
+	_, release := s.halt()
+	defer release()
+	s.applyHalted(pulled, version, digest)
+}
+
+// halt closes the admission barrier and returns the snapshot in force together
+// with the release the caller defers. An update runs every step that must look
+// atomic to admission — taking the pending inventory, swapping the snapshot —
+// inside one halt.
+func (s *policyStore) halt() (*policySnapshot, func()) {
+	s.barrier.Lock()
+	return s.snap.Load(), s.barrier.Unlock
+}
+
+// applyHalted is apply for a caller that already holds the barrier, tagging
+// the snapshot with the digest the policy was fetched by.
+func (s *policyStore) applyHalted(pulled *allowlist.Allowlist, version uint64, digest string) {
+	s.snap.Store(&policySnapshot{index: pulled.BuildIndex(), doc: pulled, version: version, digest: digest})
 }
 
 // containerdOps is the containerd surface admission drives; internal/containerd's
@@ -121,6 +157,11 @@ type plugin struct {
 	// running in it, not by the namespace name. nil ⇔ not opted in
 	// (policy.exempt_namespaces empty) or not yet captured. See exempt.go.
 	exempt atomic.Pointer[exemptSnapshot]
+
+	// live is the node's live-instance and pending-removal accounting, which
+	// the CDS state loop drives. Always present: unlike the inventory it
+	// is not configurable, and admission records into it unconditionally.
+	live *liveInstances
 
 	// inventory serves the sandbox-identity flow (docs/ratls.md). nil ⇔ the flow
 	// is disabled (no workload_claims.socket_dir) — configuration, not a
@@ -149,6 +190,7 @@ func newPlugin(
 		audit:      auditLogger,
 		logger:     logger,
 		containerd: ctrd,
+		live:       newLiveInstances(),
 	}
 	if cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
@@ -217,10 +259,12 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 	mask.Set(api.Event_CREATE_CONTAINER)
 	mask.Set(api.Event_START_CONTAINER)
 	mask.Set(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
-	if p.inventory != nil {
+	if p.inventory != nil || p.cfg.PullEnabled() {
 		// The inventory needs eviction on stop to stay correct across pod churn,
 		// and the pod-sandbox lifecycle to keep its sandbox set (the /sandbox
-		// and /digests routes) live.
+		// and /digests routes) live. A CDS pull needs the same events for drain
+		// accounting: an update completes when the last pending instance is
+		// reported gone.
 		mask.Set(api.Event_REMOVE_CONTAINER)
 		mask.Set(api.Event_RUN_POD_SANDBOX)
 		mask.Set(api.Event_REMOVE_POD_SANDBOX)
@@ -228,13 +272,14 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 	return mask, nil
 }
 
-// RemoveContainer evicts a stopped container from caller resolution; the
-// sandbox's record keeps it (inventory.remove). Only subscribed when the
-// inventory is enabled (see Configure).
+// RemoveContainer evicts a stopped container from caller resolution and from
+// the live set; the sandbox's cumulative record keeps it (inventory.remove).
+// Removing the last pending instance is what completes a drain.
 func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
 	if p.inventory != nil {
 		p.inventory.remove(ctr.GetId())
 	}
+	p.live.remove(ctr.GetId())
 	return nil
 }
 
@@ -253,6 +298,7 @@ func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) erro
 	if p.inventory != nil {
 		p.inventory.removeSandbox(pod.GetId())
 	}
+	p.live.removeSandbox(pod.GetId())
 	return nil
 }
 
@@ -262,9 +308,12 @@ func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) erro
 // fail-closed, and logged at error because it costs the pod its claim.
 //
 // INVARIANT: callers record what runs, not what passed the checks.
-func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) {
-	if p.inventory == nil {
-		return
+func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) string {
+	// Nothing reads a digest on this node: no inventory to answer with it, and
+	// no CDS policy update to attribute the instance to. Skipping keeps the
+	// containerd round-trip off the start path.
+	if p.inventory == nil && !p.cfg.PullEnabled() {
+		return ""
 	}
 	digest := extractDigest(imageRef)
 	if digest == "" && imageRef != "" {
@@ -275,13 +324,16 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 		}
 	}
 	p.recordDigest(ctr, digest)
+	return digest
 }
 
 // recordUncheckedForInventory records the digest inlined in the reference
 // without resolving; the pre-Ready hook must answer inside NRI's
 // plugin_request_timeout, so recording adds no containerd round-trip.
-func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) {
-	p.recordDigest(ctr, extractDigest(imageRef))
+func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) string {
+	digest := extractDigest(imageRef)
+	p.recordDigest(ctr, digest)
+	return digest
 }
 
 // recordDigest is the only inventory.record call site. ctr.Args is the
@@ -659,17 +711,32 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 		podByID[pod.GetId()] = pod
 	}
 
+	// One barrier span for the whole sweep: the verdicts and the live set it
+	// rebuilds must describe the same snapshot, and a reconnect is not on the
+	// container-creation hot path.
+	snap, release := p.policy.enter()
+	defer release()
+
 	var killed, failed int
 	for _, ctr := range ctrs {
 		// Recorded ahead of the lookup that can skip it; the record needs no pod.
 		imageRef := ctr.GetAnnotations()[annotationImageName]
-		p.recordForInventory(ctx, ctr, imageRef)
+		p.recordLive(snap, ctr, p.recordForInventory(ctx, ctr, imageRef))
 
 		pod := podByID[ctr.GetPodSandboxId()]
 		if pod == nil {
 			continue
 		}
 		if verdict, _ := p.checkContainer(ctx, cfg, pod, ctr, imageRef); verdict != verdictDeny {
+			continue
+		}
+		// An instance the active policy no longer admits but an update
+		// marked pending is authorized until it stops: the drain contract
+		// lets it finish, it does not kill it (docs/allowlist-and-capabilities.md,
+		// "Enforcer updates").
+		if p.live.isPending(ctr.GetId()) {
+			p.logger.Info("leaving a container whose admitting rule is pending removal",
+				"container", ctr.GetName(), "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			continue
 		}
 		// A running container in an exempt namespace is never killed: stopping a
@@ -751,6 +818,9 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 // OCI spec after all NRI/CDI edits.
 // Nothing is added to the admission history until that final check.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	_, release := p.policy.enter()
+	defer release()
+
 	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], false)
 	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
 		if !p.Ready() {
@@ -768,19 +838,35 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 func (p *plugin) StartContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
 	cfg := p.cfg
 	imageRef := ctr.GetAnnotations()[annotationImageName]
+
+	// The barrier spans the check and the record: an update that swaps the
+	// snapshot in between would acknowledge a pending set this container is
+	// missing from while it runs under a rule the swap removed.
+	snap, release := p.policy.enter()
+	defer release()
+
 	if !p.Ready() {
 		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
 			return err
 		}
-		p.recordUncheckedForInventory(ctr, imageRef)
+		p.recordLive(snap, ctr, p.recordUncheckedForInventory(ctr, imageRef))
 		return nil
 	}
 	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
 	if verdict == verdictDeny && cfg.Policy.Mode != ModeAudit {
 		return fmt.Errorf("%s", reason)
 	}
-	p.recordForInventory(ctx, ctr, imageRef)
+	p.recordLive(snap, ctr, p.recordForInventory(ctx, ctr, imageRef))
 	return nil
+}
+
+// recordLive adds a container the plugin let run to the live set, tagged with
+// the rule of snap that admitted it. A container admitted by something other
+// than a rule of the served document — always_allow, an exempt namespace,
+// audit mode — gets an empty tag and so is never pending: a policy update
+// cannot remove a permission CDS did not grant.
+func (p *plugin) recordLive(snap *policySnapshot, ctr *api.Container, digest string) {
+	p.live.admit(ctr.GetId(), ctr.GetPodSandboxId(), p.admittedRuleKey(snap, ctr, digest))
 }
 
 // socketDirAdjustment bind-mounts the inventory's socket directory, read-only,

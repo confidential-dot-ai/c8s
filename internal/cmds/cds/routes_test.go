@@ -35,7 +35,7 @@ func newStubRouter(t *testing.T) http.Handler {
 	cs := attestation.NewChallengeStore(time.Minute)
 	deps := dependencies{
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: testPublications(t, &store)},
 		ReadyFn:          func() bool { return true },
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
@@ -57,7 +57,7 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 	}
 	deps := dependencies{
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: testPublications(t, &store)},
 		ReadyFn:          func() bool { return true },
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
@@ -93,7 +93,7 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 		t.Fatalf("rate limiter: %v", err)
 	}
 	deps := dependencies{
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: testPublications(t, &store)},
 		ReadyFn:          func() bool { return true },
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
@@ -141,7 +141,7 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 	}
 	deps := dependencies{
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: testPublications(t, &store)},
 		ReadyFn:          func() bool { return true },
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
@@ -245,7 +245,7 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 	cs := attestation.NewChallengeStore(time.Minute)
 	deps := dependencies{
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }, Publications: testPublications(t, &store)},
 		ReadyFn:          func() bool { return true },
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),

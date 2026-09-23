@@ -69,6 +69,8 @@ func newAttestLBServer(t *testing.T, identity testMeshIdentity, servingCertFile 
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -154,7 +156,8 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 	nonce := make([]byte, 32)
 	pq, err := overenc.IdentityTranscriptHash(types.FrontDoorModeCDS,
 		make([]byte, overenc.XWingEKBytes), make([]byte, overenc.XWingCTBytes),
-		make([]byte, overenc.SessionIDBytes), nonce, identity.leaf.Raw, identity.ca.Raw)
+		make([]byte, overenc.SessionIDBytes), nonce, identity.leaf.Raw, identity.ca.Raw,
+		"sha256:"+hexRepeat(0x01), []string{digestP}, testRoute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +180,8 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
+		State:                freshStateProvider(t),
+		StateMaxAge:          time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -318,6 +323,8 @@ func TestReadyzGatesOnMatchedWorkloadStamp(t *testing.T) {
 			MeshIdentityCertFile: identity.certFile,
 			MeshIdentityKeyFile:  identity.keyFile,
 			MeshIdentityCAFile:   identity.caFile,
+			State:                freshStateProvider(t),
+			StateMaxAge:          time.Minute,
 			ExpectedWorkload:     expected,
 		})
 		ts := httptest.NewServer(srv.Handler())

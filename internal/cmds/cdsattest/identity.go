@@ -107,8 +107,11 @@ func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
 	return nil
 }
 
-func (m *meshIdentity) bind(mode types.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
-	transcriptHash, err := overenc.IdentityTranscriptHash(mode, xwingEK, xwingCT, sessionID, nonce, m.leaf.Raw, m.ca.Raw)
+// bind computes the attest-pq report_data transcript and signs it. state is
+// the policy the session runs under: attest-pq always commits one.
+func (m *meshIdentity) bind(mode types.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce []byte, state *stateBinding) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.IdentityTranscriptHash(mode, xwingEK, xwingCT, sessionID, nonce,
+		m.leaf.Raw, m.ca.Raw, state.hash, state.envelope, state.route)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -122,7 +125,8 @@ func (m *meshIdentity) bind(mode types.FrontDoorMode, xwingEK, xwingCT, sessionI
 // bindServingLeaf is the attest-lb sibling of bind: it commits the exact outer
 // serving leaf alongside the mesh identity and signs that transcript. No
 // session key exists on this path — the TLS handshake itself proves possession
-// of the serving-leaf key.
+// of the serving-leaf key — and no policy is committed: this sidecar owns no
+// attest-lb session, so it cannot hold one to an envelope.
 func (m *meshIdentity) bindServingLeaf(mode types.FrontDoorMode, servingLeafDER, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
 	transcriptHash, err := overenc.LBTranscriptHash(mode, nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw)
 	if err != nil {

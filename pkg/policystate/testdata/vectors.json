@@ -1,0 +1,80 @@
+{
+  "protocol": "c8s.policystate/v1",
+  "ed25519_seed": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "authority_key": "MCowBQYDK2VwAyEA6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "authority": "sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e",
+  "boot_key": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "boot_id": "sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+  "challenge_nonce": "KioqKioqKioqKioqKioqKg",
+  "vectors": [
+    {
+      "name": "canonical/escaping",
+      "canonical": "{\"control\":\"tab\\tnewline\\nquote\\\"backslash\\\\\\u0001\",\"count\":9007199254740991,\"html\":\"<a> & </a>\",\"nested\":{\"apple\":\"a\",\"zebra\":\"z\"},\"unicode\":\"héllo … 日本 🔒\"}"
+    },
+    {
+      "name": "canonical/state-quiet",
+      "canonical": "{\"active_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"active_version\":1,\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"deployment_id\":\"deploy-1\",\"issued_at\":\"2026-09-14T10:00:00Z\",\"log_head\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"log_position\":1,\"protocol\":\"c8s.policystate/v1\",\"update\":null}"
+    },
+    {
+      "name": "canonical/state-update",
+      "canonical": "{\"active_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"active_version\":4,\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"deployment_id\":\"deploy-1\",\"issued_at\":\"2026-09-14T10:00:00Z\",\"log_head\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"log_position\":7,\"protocol\":\"c8s.policystate/v1\",\"update\":{\"requires_drain\":true,\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"switched\":true,\"target_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"version\":4}}"
+    },
+    {
+      "name": "hash/c8s.policystate/v1/state",
+      "domain": "c8s.policystate/v1/state",
+      "canonical": "{\"a\":1}",
+      "hash": "sha256:597fa5c2c6394809a2e80e9e3cdb1bc78867c10b5184805c9e6a7cf899a11483"
+    },
+    {
+      "name": "hash/c8s.policystate/v1/challenge",
+      "domain": "c8s.policystate/v1/challenge",
+      "canonical": "{\"a\":1}",
+      "hash": "sha256:479538502786d6ae39659490d23a09538bffd2fb425b66a1a759d2d80ba41960"
+    },
+    {
+      "name": "hash/c8s.policystate/v1/ack",
+      "domain": "c8s.policystate/v1/ack",
+      "canonical": "{\"a\":1}",
+      "hash": "sha256:95b9bdeb4048c1c0017ba498a23c6ddc6b389a3b2b4afdaf1df94c38cd69a365"
+    },
+    {
+      "name": "object/policy",
+      "canonical": "{\"schema\":\"c8s.allowlist/v1\",\"workloads\":{}}",
+      "hash": "sha256:cb60702967430267308c478b212dd7269d5271680b8d460fe425b7a396324980"
+    },
+    {
+      "name": "journal/entry-1",
+      "canonical": "{\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"payload\":{\"authorized_by\":\"seed\",\"requires_drain\":false,\"target_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"version\":1},\"position\":1,\"protocol\":\"c8s.policystate/v1\",\"time\":\"2026-09-14T10:00:00Z\",\"type\":\"published\"}",
+      "hash": "sha256:a22b0cfb60cfdb921bcf85251718efd1cf1315bb0ae489bc1a1cd17de9024a82"
+    },
+    {
+      "name": "journal/entry-2",
+      "canonical": "{\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"parent\":\"sha256:a22b0cfb60cfdb921bcf85251718efd1cf1315bb0ae489bc1a1cd17de9024a82\",\"payload\":{\"authorized_by\":\"operator\",\"requires_drain\":true,\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"target_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"version\":2},\"position\":2,\"protocol\":\"c8s.policystate/v1\",\"time\":\"2026-09-14T10:01:00Z\",\"type\":\"published\"}",
+      "hash": "sha256:ec1e0c49ee78b542319ba318ddd888f54a4cfaaa11f38dbfce72ab789f948ae8"
+    },
+    {
+      "name": "journal/entry-3",
+      "canonical": "{\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"parent\":\"sha256:ec1e0c49ee78b542319ba318ddd888f54a4cfaaa11f38dbfce72ab789f948ae8\",\"payload\":{\"version\":2},\"position\":3,\"protocol\":\"c8s.policystate/v1\",\"time\":\"2026-09-14T10:02:00Z\",\"type\":\"drained\"}",
+      "hash": "sha256:c9bdc0a04e71e611e4c50e64d82df6d2f293d5b8ef75af6e0672180dd2c134da"
+    },
+    {
+      "name": "state/signed",
+      "domain": "c8s.policystate/v1/state",
+      "canonical": "{\"active_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"active_version\":4,\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"deployment_id\":\"deploy-1\",\"issued_at\":\"2026-09-14T10:00:00Z\",\"log_head\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"log_position\":7,\"protocol\":\"c8s.policystate/v1\",\"update\":{\"requires_drain\":true,\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"switched\":true,\"target_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"version\":4}}",
+      "hash": "sha256:30489ef9d7fa570450cc68942fe9ad8bbc8acbf3c5d4699900d9bfa2af377206",
+      "signature": "OYk9gO3wbucXdZWoLWEZAekXOrSl9frNH42Ktb1ApPlwAye6unucVkaOBLj97BFqvG1lHpLYgKxjA2wAjMVbBQ"
+    },
+    {
+      "name": "state/challenge",
+      "domain": "c8s.policystate/v1/challenge",
+      "canonical": "{\"authority\":\"sha256:324be2dea8bc44461b0233e51fa48902ed6b1cc671e7739af2551e0bfe68f54e\",\"log_head\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"log_position\":7,\"nonce\":\"KioqKioqKioqKioqKioqKg\"}",
+      "signature": "tMAog_2cmNUfORVtBh58WDSHBjxw3nIstpYBVuScWhJ2Oxn-TuBEtAZhJUPVgNOZaRG-eGFCNRZpo9jWTiiSBg"
+    },
+    {
+      "name": "participant/ack",
+      "domain": "c8s.policystate/v1/ack",
+      "canonical": "{\"boot_id\":\"sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889\",\"protocol\":\"c8s.policystate/v1\",\"retired\":2,\"target_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"version\":4}",
+      "signature": "IRgPguokF12AdTkgzvYavv_ShRXBqFLFXu5IErNmXF98hw7wLmsWXwDQLyDrOh91S_E0kzy19rUSvTvBoO-lBQ"
+    }
+  ]
+}

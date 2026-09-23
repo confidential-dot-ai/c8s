@@ -55,7 +55,7 @@ func TestSeedStore_AddsAllEntries(t *testing.T) {
 	defer store.Close()
 
 	path := writeSeed(t, anySeed(map[string]string{"cds": digestA, "as": digestB}))
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestSeedStore_IdempotentDoesNotBumpVersion(t *testing.T) {
 	defer store.Close()
 
 	path := writeSeed(t, anySeed(map[string]string{"cds": digestA}))
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
 	_, v1, err := store.LoadAll()
@@ -96,7 +96,7 @@ func TestSeedStore_IdempotentDoesNotBumpVersion(t *testing.T) {
 		t.Fatalf("LoadAll: %v", err)
 	}
 
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
 	_, v2, err := store.LoadAll()
@@ -123,7 +123,7 @@ func TestSeedStore_PreservesExistingEntries(t *testing.T) {
 	}
 
 	path := writeSeed(t, anySeed(map[string]string{"cds": digestA, "runtime": digestA}))
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestSeedStore_FailsClosedOnBadDigest(t *testing.T) {
 
 	// "sha256:bad" fails ParseJSON's digest validation.
 	path := writeSeed(t, anySeed(map[string]string{"cds": "sha256:bad"}))
-	if err := seedStore(&store, path); err == nil {
+	if _, err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore accepted a malformed digest; want fail-closed error")
 	}
 }
@@ -160,7 +160,7 @@ func TestSeedStore_FailsClosedOnMissingFile(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := seedStore(&store, filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
+	if _, err := seedStore(&store, filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
 		t.Fatal("seedStore accepted a missing seed file; want fail-closed error")
 	}
 }
@@ -174,7 +174,7 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	_ = store.Close()
 
 	path := writeSeed(t, anySeed(map[string]string{"cds": digestA}))
-	if err := seedStore(&store, path); err == nil {
+	if _, err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
 	}
 }
