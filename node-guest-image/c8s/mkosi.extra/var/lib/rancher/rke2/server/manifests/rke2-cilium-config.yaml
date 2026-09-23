@@ -55,6 +55,20 @@ spec:
         ingress:
           enabled: true
 
+    # No postStart exec hook. Cilium's chart renders one (a cleanup of the
+    # iptables rules the AWS VPC CNI leaves behind) on every agent container
+    # whenever cni.install is on. The locked node image routes containerd's
+    # runc handler through /usr/local/bin/c8s-runc, which denies `runc exec`,
+    # and every CRI ExecSync — exec probes and lifecycle exec hooks included —
+    # ends in that call. A failed postStart hook is not advisory: the kubelet
+    # kills the container, so cilium-agent crash-loops, the node never goes
+    # Ready and nothing schedules. This node is never on AWS, so the hook has
+    # nothing to clean up; turning it off is the chart's own supported switch.
+    # The preStop hook stays: its failure is best-effort and does not kill the
+    # container.
+    cni:
+      iptablesRemoveAWSRules: false
+
     # Direct apiserver address — single-node uses the host loopback.
     # RKE2's kube-apiserver binds on 0.0.0.0:6443 so 127.0.0.1 works.
     k8sServiceHost: 127.0.0.1
