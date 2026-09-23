@@ -472,6 +472,21 @@ if ! grep -qF 'ExecStart=/usr/local/bin/c8s attest-proxy ' "$units/attest-proxy.
   exit 1
 fi
 
+# A baked ValidatingAdmissionPolicy may not pair "*/*" with "*" in one
+# resourceRules entry: the apiserver rejects the combination ("if '*/*' is
+# present, must not specify other resources"), so RKE2 never creates the
+# policy. psa-ready.sh waits for every guard under /usr/lib/confai/guards to
+# be live before cred-release listens, so one inadmissible guard leaves the
+# unit in start-pre forever — and the locked image cannot report that, because
+# :8443 is the only way in. Caught here, at build time, instead.
+manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+paired=$(grep -rn '"\*/\*"' "$manifests" | grep -F '"*"' || true)
+if [ -n "$paired" ]; then
+  echo "::error::a baked resourceRules entry lists \"*\" alongside \"*/*\"; the apiserver rejects that pair, so the policy is never created and psa-ready blocks cred-release:"
+  echo "$paired"
+  exit 1
+fi
+
 # A host-accessible arbitrary REPORTDATA API would let a host borrow a real
 # node's attestation for its own keys. The finalize hook preserves the selected
 # confos attester configuration and verifies that its bind is now loopback.

@@ -90,4 +90,18 @@ if ! run_gate EXPECT_IMMUTABLE_ROOT=0; then
   fail "explicit legacy compatibility override was rejected"
 fi
 tests=$((tests + 1))
+# A guard whose resourceRules pair "*" with "*/*" is inadmissible: the
+# apiserver rejects the pair, so RKE2 never creates the policy and psa-ready
+# blocks cred-release forever. The gate must reject it at build time.
+scope_policy="$fixture_dir/node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/operator-scope-policy.yaml"
+sed -i 's|resources: \["\*/\*"\]|resources: ["*", "*/*"]|' "$scope_policy"
+if run_gate; then
+  fail 'a resourceRules entry pairing "*" with "*/*" was accepted'
+fi
+grep -Fq 'alongside "*/*"' "$fixture_dir/output" || {
+  cat "$fixture_dir/output"
+  fail 'the inadmissible resourceRules pair failed for an unrelated reason'
+}
+tests=$((tests + 1))
+
 echo "$tests node-image invariant assertions passed"
