@@ -81,10 +81,21 @@ const (
 	VolumeContainerName = "c8s-volume"
 )
 
+// CertWaitContainerName is the run-once init container injected beside
+// c8s-cert to hold the workload until the first certificate lands.
+const CertWaitContainerName = "c8s-cert-wait"
+
 // IsSidecarContainer reports whether name is one of the injected sidecars that
 // receive the inventory socket-directory mount.
 func IsSidecarContainer(name string) bool {
 	return name == CertContainerName || name == SecretContainerName || name == VolumeContainerName
+}
+
+// IsInjectedContainerName reports whether name is one the admission webhook
+// injects. Names are host-written, so it holds only over authored input;
+// runtime matching goes by digest and entrypoint (internal/secrets.WorkloadContainers).
+func IsInjectedContainerName(name string) bool {
+	return IsSidecarContainer(name) || name == CertWaitContainerName
 }
 
 // InventoryEndpoint is get-cert's compiled inventory endpoint on node-CVM: the
@@ -165,9 +176,9 @@ type SandboxTokenRequest struct {
 // now — see docs/secrets.md, "The report is a high-water mark".
 //
 // Digests is the deduplicated digest set cert issuance gates on. Containers
-// carries each container's effective argv, deduplicated by SandboxContainer.Key
-// (the whole (digest, argv, env) tuple, not the digest alone), so a consumer can hold
-// a sandbox to the pair each container actually ran with.
+// carries each distinct admission, deduplicated by SandboxContainer.Key
+// (digest, argv, env, mounts), so a consumer can hold a sandbox
+// to every launch configuration it actually ran.
 //
 // Digests is [] (never null) for a known sandbox with no containers. Containers
 // is absent on an inventory that predates it, which consumers must treat as
@@ -177,10 +188,13 @@ type SandboxDigestsResponse struct {
 	Containers []SandboxContainer `json:"containers,omitempty"`
 }
 
-// SandboxContainer is one admitted container: the bytes, and what they were
-// told to run, plus an optional commitment to its final OCI environment.
+// SandboxContainer is one admitted container: the bytes, what they were told
+// to run, an optional environment commitment, and observed mounts.
+// Mounts must serialize without omitempty: null (or an absent field on input)
+// means unavailable evidence, while [] proves no mounts were observed.
 type SandboxContainer struct {
 	Env    *allowlist.EnvObservation `json:"env,omitempty"`
+	Mounts []allowlist.ObservedMount `json:"mounts"`
 	Digest string                    `json:"digest"`
 	// Argv is the effective OCI process.args — the merged image-config and
 	// pod-spec command, which is what the argv policy is written against.

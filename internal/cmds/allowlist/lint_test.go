@@ -28,6 +28,106 @@ func TestLintCleanAllowlistReportsOK(t *testing.T) {
 	}
 }
 
+// The derive -> lint -> apply loop: what 'derive' emits is a bare name-keyed
+// map, and 'lint' must pre-flight it rather than reject it as a document with
+// an unknown field.
+func TestLintAcceptsDeriveOutput(t *testing.T) {
+	pod := writeFile(t, "pod.json", deployJSON())
+
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		entry string
+		wants []string
+	}{
+		{
+			name:  "clean",
+			args:  []string{"derive", "dynamo", pod, "--env=deny"},
+			entry: "dynamo",
+			wants: []string{"ok: no findings"},
+		},
+		{
+			name:  "secret grant is linted, not rejected",
+			args:  []string{"derive", "dynamo-secret", pod, "--env=any", "--secret-read", "/test/hello"},
+			entry: "dynamo-secret",
+			wants: []string{`workload "dynamo-secret" grants secrets without pinning environment values`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			derived, _, err := runCmd(tc.args...)
+			if err != nil {
+				t.Fatalf("derive: %v", err)
+			}
+
+			// "ok: no findings" is also what linting nothing prints, so pin the
+			// entries the shared decoder actually recovered from that output.
+			entries, err := parseWorkloadEntries([]byte(derived))
+			if err != nil {
+				t.Fatalf("decode derived output: %v\n%s", err, derived)
+			}
+			w, ok := entries[tc.entry]
+			if !ok {
+				t.Fatalf("derived output is not keyed by %q: %v", tc.entry, entries)
+			}
+			if len(w.InitContainers) != 1 || len(w.Containers) != 2 {
+				t.Fatalf("entry %q has %d init / %d containers, want 1 / 2", tc.entry, len(w.InitContainers), len(w.Containers))
+			}
+
+			out, _, err := runCmd("lint", writeFile(t, "entry.json", derived))
+			if err != nil {
+				t.Fatalf("lint of derived entry: %v\n%s", err, out)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(out, want) {
+					t.Errorf("lint output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// Accepting the shapes 'apply' accepts must not make lint lenient. Wrapping a
+// bare map into a document puts it under the document rules, so everything
+// ParseJSON refuses on the way in is still refused.
+func TestLintRejectsForeignAndMalformedInput(t *testing.T) {
+	entry := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
+
+	for name, body := range map[string]string{
+		"pod spec":             deployJSON(),
+		"unknown schema":       `{"schema":"other/v1","workloads":{}}`,
+		"empty object":         `{}`,
+		"json null":            `null`,
+		"not json":             `schema: c8s.allowlist/v1`,
+		"illegal entry name":   `{"foo/bar":` + entry + `}`,
+		"oversized entry name": `{"` + strings.Repeat("a", 64) + `":` + entry + `}`,
+		// encoding/json keeps the last value for a repeated key, so a body that
+		// shows one entry to a reader could lint and apply another.
+		"duplicate entry name": `{"app":` + entry + `,"app":` + entry + `}`,
+		"two documents":        `{"app":` + entry + `}` + "\n" + `{"evil":` + entry + `}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := runCmd("lint", writeFile(t, "in.json", body)); err == nil {
+				t.Fatalf("lint accepted %s", name)
+			}
+		})
+	}
+}
+
+// A bare map carrying more than one entry must reach the cross-entry checks and
+// fail the lint, not just the per-entry ones.
+func TestLintBareMapReportsIndistinguishableEntries(t *testing.T) {
+	entry := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
+	f := writeFile(t, "entries.json", `{"one":`+entry+`,"two":`+entry+`}`)
+
+	out, _, err := runCmd("lint", f)
+	if err == nil {
+		t.Fatalf("expected a lint error, got:\n%s", out)
+	}
+	if !strings.Contains(out, "declare the same containers") {
+		t.Fatalf("lint output missing the ambiguity finding:\n%s", out)
+	}
+}
+
 func TestLintOnlineChecks(t *testing.T) {
 	cranetest.Install(t)
 	goodRef := "registry.example.com/app@" + digA
@@ -106,11 +206,39 @@ func TestInspectImageJSON(t *testing.T) {
 
 // --- shadowed entries ---
 
-// An any-argv entry for a digest shadows a narrower entry declaring only that
+func TestLintUnconstrainedChecksAllLaunchFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		wantAny      bool
+	}{
+		{"all any", `"mounts":{"policy":"any"},"env":{"policy":"any"}`, true},
+		{"default mounts", `"env":{"policy":"any"}`, false},
+		{"deny mounts", `"mounts":{"policy":"deny"},"env":{"policy":"any"}`, false},
+		{"deny env", `"mounts":{"policy":"any"},"env":{"policy":"deny"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wide := `[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},` + tc.fields + `}]`
+			narrow := `[` + ctrJSON(digA, "/app") + `]`
+			al := entryPair(t, wide, narrow)
+			var gotAny bool
+			for _, f := range lintOffline(al) {
+				gotAny = gotAny || strings.Contains(f.msg, "effective admission for that digest is 'any'")
+			}
+			if gotAny != tc.wantAny {
+				t.Fatalf("unconstrained warning = %v, want %v", gotAny, tc.wantAny)
+			}
+			if got := shadows(al.Workloads["alpha"], al.Workloads["beta"]); got != tc.wantAny {
+				t.Fatalf("unconstrained shadow = %v, want %v", got, tc.wantAny)
+			}
+		})
+	}
+}
+
+// An unconstrained entry for a digest shadows a narrower entry declaring only that
 // digest: every pod the narrow entry describes matches both, so the narrow
 // entry can never be released to.
 func TestLintShadowedEntry(t *testing.T) {
-	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}]}`
+	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}`
 	narrow := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
 
 	errs := func(doc string) []string {
@@ -165,7 +293,7 @@ func entryPair(t *testing.T, a, b string) *pkgallowlist.Allowlist {
 func ambiguityErrors(findings []finding) []string {
 	var out []string
 	for _, f := range findings {
-		if f.err && strings.Contains(f.msg, "same containers with the same command, args and env policy") {
+		if f.err && strings.Contains(f.msg, "same containers with the same command, args, mounts and env policy") {
 			out = append(out, f.msg)
 		}
 	}
@@ -308,5 +436,65 @@ func TestWorkloadApplyDoesNotDoubleReportInFileCollision(t *testing.T) {
 	}
 	if len(ambiguityErrors(lintOffline(incoming))) != 1 {
 		t.Fatal("the file lint should have reported it")
+	}
+}
+
+func TestLintRejectsSearchPathsOverlappingDataMounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable, value, kind string
+		refused                     bool
+	}{
+		{"same directory", "PATH", "/usr/bin:/mnt/c8s-data/tools", "data", true},
+		{"parent directory", "PYTHONPATH", "/mnt/c8s-data", "data", true},
+		{"descendant directory", "LD_LIBRARY_PATH", "/mnt/c8s-data/tools/lib", "data", true},
+		{"cleaned traversal", "NODE_PATH", "/mnt/c8s-data/tools/lib/../modules", "data", true},
+		{"root directory", "PATH", "/", "data", true},
+		{"unrelated directory", "NODE_PATH", "/usr/lib/node_modules", "data", false},
+		{"lookalike prefix", "PATH", "/mnt/c8s-data/toolset", "data", false},
+		{"application data variable", "DATA_PATH", "/mnt/c8s-data/tools", "data", false},
+		{"emptyDir is not operator data", "PATH", "/mnt/c8s-data/tools", "emptyDir", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},` +
+				`"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/tools","kind":"` + tc.kind + `"}]},` +
+				`"env":{"policy":"exact","values":{"` + tc.variable + `":"` + tc.value + `"}}}`
+			// Use an init container as well as a main to exercise both lists.
+			file := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"initContainers":[`+container+`],"containers":[`+ctrJSON(digB, "/main")+`]}}}`)
+			for _, flags := range [][]string{nil, {"--cvm-mode=pod"}, {"--cvm-mode=node"}} {
+				args := append([]string{"lint", "--strict", file}, flags...)
+				out, _, err := runCmd(args...)
+				if (err != nil) != tc.refused {
+					t.Fatalf("lint %v error = %v, want refusal %v; output: %s", flags, err, tc.refused, out)
+				}
+				if tc.refused && !strings.Contains(out, "overlapping data mount") {
+					t.Fatalf("lint did not explain the search-path conflict: %s", out)
+				}
+			}
+		})
+	}
+}
+
+func TestLintAmbiguityIncludesMountPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+		ambiguous           bool
+	}{
+		{"omitted means deny", ``, `,"mounts":{"policy":"deny"}`, true},
+		{"different destinations", `,"mounts":{"policy":"exact","rules":[{"destination":"/cache","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/work","kind":"emptyDir"}]}`, false},
+		{"different classes", `,"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/config","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/config","kind":"data"}]}`, false},
+		{"reordered rules", `,"mounts":{"policy":"exact","rules":[{"destination":"/cache","kind":"emptyDir"},{"destination":"/work","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/work","kind":"emptyDir"},{"destination":"/cache","kind":"emptyDir"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}`
+			al := entryPair(t, `[`+container+tc.first+`}]`, `[`+container+tc.second+`}]`)
+			if got := len(ambiguityErrors(lintOffline(al))) != 0; got != tc.ambiguous {
+				t.Fatalf("ambiguity = %v, want %v", got, tc.ambiguous)
+			}
+			incoming := map[string]pkgallowlist.Workload{"beta": al.Workloads["beta"]}
+			live := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{"alpha": al.Workloads["alpha"]}}
+			if got := countErrors(collisionsWithLive(incoming, live)) != 0; got != tc.ambiguous {
+				t.Fatalf("live collision = %v, want %v", got, tc.ambiguous)
+			}
+		})
 	}
 }

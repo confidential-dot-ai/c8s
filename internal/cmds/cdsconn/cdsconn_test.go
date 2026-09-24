@@ -19,6 +19,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -59,9 +60,9 @@ func TestHTTPClientFallsBackToRATLS(t *testing.T) {
 	o := Options{
 		URL:     "https://" + closedAddr(t),
 		Timeout: time.Second,
-		Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+		Verifier: testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 			return nil, nil
-		},
+		}),
 	}
 	hc, err := o.HTTPClient(context.Background())
 	if err != nil {
@@ -215,15 +216,18 @@ func TestBindFlagsNamesEveryOption(t *testing.T) {
 	var o Options
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	BindFlags(fs, &o)
-	for _, name := range []string{"url", "measurements", "measurements-file", "timeout", "operator-key", "insecure"} {
+	for _, name := range []string{"url", "measurements", "measurements-file", "image-policy-file", "timeout", "operator-key", "insecure"} {
 		if fs.Lookup(name) == nil {
 			t.Errorf("--%s is not bound", name)
 		}
 	}
-	if err := fs.Parse([]string{"--url", "https://cds.example", "--operator-key", "/k.pem"}); err != nil {
+	if fs.Lookup("measurements-config") != nil {
+		t.Fatal("removed --measurements-config alias is still bound")
+	}
+	if err := fs.Parse([]string{"--url", "https://cds.example", "--operator-key", "/k.pem", "--image-policy-file", "policy.json"}); err != nil {
 		t.Fatal(err)
 	}
-	if o.URL != "https://cds.example" || o.OperatorKey != "/k.pem" {
+	if o.URL != "https://cds.example" || o.OperatorKey != "/k.pem" || o.MeasurementsConfig != "policy.json" {
 		t.Fatalf("parsed into %+v", o)
 	}
 }

@@ -1,12 +1,12 @@
 # Product checks boot published measured node images on each hardware platform.
-# The image and its complete identity come from the lane's producer refs CM.
-# c8s_ref selects the external CLI/test source; it does not replace baked code.
+# TDX stages the image published for the selected source commit. SNP requires
+# matching staged producer metadata. Services remain baked into each image.
 name: e2e-c8s
 on:
   workflow_call:
     inputs:
       c8s_ref:
-        description: 'Compatible CLI/test source ref; empty uses each image build ref'
+        description: 'Source ref paired with the node image; empty uses the TDX checkout or staged SNP image ref'
         type: string
         required: false
         default: ''
@@ -51,11 +51,14 @@ jobs:
       c8s_ref: ${{ inputs.c8s_ref }}
 
   tdx-metal:
-    # Staged-stack regression only. Exact-image AppArmor acceptance is called
+    # Test the requested commit with its published image. Automatic AppArmor acceptance is called
     # by c8s-image-publish.yml after publishing digest/measurement evidence.
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/tdx-metal-e2e.yml
     with:
+      # Both legs test the source selected by the caller. Automatic runs use
+      # the published image's recorded source, so a later main head cannot
+      # select different CLI/tests or an unpaired measured image.
       c8s_ref: ${{ inputs.c8s_ref }}

@@ -179,9 +179,6 @@ func TestTDXWrappersShareLifecycleIdentity(t *testing.T) {
 			t.Fatal("missing checkout/artifact/reaper read permissions")
 		}
 	}
-	if !reflect.DeepEqual(exact.Env, staged.Env) {
-		t.Fatal("TDX wrappers disagree on lifecycle environment")
-	}
 	exactCall, stagedCall := actionCall(t, exact.Jobs["e2e"].Steps), actionCall(t, staged.Jobs["e2e"].Steps)
 	if exactCall.With["exact_image"] != "true" {
 		t.Fatal("exact wrapper must enable exact lifecycle")

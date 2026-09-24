@@ -4,22 +4,20 @@ package ratlsmesh
 
 import (
 	"fmt"
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"log/slog"
 	"strings"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // resolveMeasurementsConfig loads whole peer identities. Without a separate
-// CDS config the legacy behavior accepts the same set for both purposes.
+// CDS config the same set is accepted for both purposes.
 func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error) {
 	if c.measurementsConfig == "" && c.cdsMeasurementsConfig == "" {
 		return refvalues.ReferenceValues{}, nil
-	}
-	if c.measurementsConfig != "" && (c.measurements != "" || c.rtmrs != "") {
-		return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
 	}
 	if c.cdsMeasurements != "" || c.cdsRTMRs != "" {
 		return refvalues.ReferenceValues{}, fmt.Errorf("measurements configs cannot be combined with --cds-measurements or --cds-rtmrs")
@@ -27,7 +25,8 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	var peers refvalues.ReferenceValues
 	if c.measurementsConfig != "" {
 		var err error
-		peers, err = refvalues.Load(c.measurementsConfig)
+		peers, err = (cmdsutil.ImagePolicySource{File: c.measurementsConfig}).LoadValues(
+			cmdsutil.MeasurementPinsFromStrings(c.measurements, c.rtmrs, ""))
 		if err != nil {
 			return refvalues.ReferenceValues{}, err
 		}
@@ -35,9 +34,9 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	cds := peers
 	if c.cdsMeasurementsConfig != "" {
 		var err error
-		cds, err = refvalues.Load(c.cdsMeasurementsConfig)
+		cds, err = (cmdsutil.ImagePolicySource{File: c.cdsMeasurementsConfig}).LoadValues(cmdsutil.MeasurementPins{})
 		if err != nil {
-			return refvalues.ReferenceValues{}, fmt.Errorf("--cds-measurements-config: %w", err)
+			return refvalues.ReferenceValues{}, fmt.Errorf("--cds-image-policy-file: %w", err)
 		}
 		if !peers.Empty() && peers.Family != cds.Family {
 			return refvalues.ReferenceValues{}, fmt.Errorf("peer and CDS measurements configs declare different TEEs")
@@ -52,10 +51,10 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	return peers, nil
 }
 
-// flatPins fills legacy diagnostics; verification always keeps the entries.
+// flatPins supplies digest/register diagnostics; verification keeps the entries.
 func flatPins(set refvalues.ReferenceValues) (string, string) {
 	digests, common, _ := set.Flatten()
-	return strings.Join(digests, ","), strings.Join(refvalues.FormatRTMRPins(common), ",")
+	return strings.Join(digests, ","), strings.Join(refvalues.FormatRegisterPins(common), ",")
 }
 
 // checkTEEMatchesPlatform reports a config written for the other platform. It
@@ -75,7 +74,7 @@ func checkTEEMatchesPlatform(set refvalues.ReferenceValues, teeType ratls.TEETyp
 		return nil
 	}
 	if set.Family != platform {
-		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.Family, platform)
+		return fmt.Errorf("--image-policy-file declares tee %q but this node attests as %q", set.Family, platform)
 	}
 	return nil
 }

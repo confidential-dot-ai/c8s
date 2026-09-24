@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -117,5 +116,31 @@ func TestHistoryEnvVariantsAndOwnership(t *testing.T) {
 			t.Fatal("tuple key collision")
 		}
 		seen[c.Key()] = true
+	}
+}
+
+func TestHistoryMountEvidenceAndOwnership(t *testing.T) {
+	var h History
+	mounts := []allowlist.ObservedMount{{Destination: "/config", Class: allowlist.MountData, Storage: allowlist.MountMemory}}
+	h.Record("c", "sha256:a", []string{"run"}, nil, mounts...)
+	h.Record("legacy", "sha256:a", []string{"run"}, nil)
+	mounts[0].Destination = "/changed"
+	_, cs, err := h.Snapshot()
+	if err != nil || len(cs) != 2 {
+		t.Fatalf("history lost observed and legacy variants: %v %v", cs, err)
+	}
+	for _, c := range cs {
+		if c.Mounts != nil {
+			if len(c.Mounts) != 1 || c.Mounts[0].Destination != "/config" {
+				t.Fatalf("history borrowed mount observation: %+v", c)
+			}
+			c.Mounts[0].Destination = "/mutated"
+		}
+	}
+	_, again, _ := h.Snapshot()
+	for _, c := range again {
+		if c.Mounts != nil && c.Mounts[0].Destination != "/config" {
+			t.Fatal("snapshot borrowed history's mount slice")
+		}
 	}
 }

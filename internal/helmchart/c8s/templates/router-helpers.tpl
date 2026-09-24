@@ -486,6 +486,7 @@ nginx :80 server, and the cert-path helpers below.
 {{- define "router.acmeCertDir" -}}/etc/c8s-acme-tls{{- end -}}
 {{- define "router.acmeChallengePort" -}}8402{{- end -}}
 {{- define "router.acmeHTTPPort" -}}8080{{- end -}}
+{{- define "router.acmeReadyPort" -}}8403{{- end -}}
 
 {{/*
 Path to the public-TLS certificate nginx serves: the publicTLS Secret
@@ -567,10 +568,16 @@ list.
 {{- if .Values.router.discovery.enabled -}}
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.router.discovery.mountPath) -}}
 {{- end -}}
-{{- if .Values.attestationApi.enabled -}}
+{{- if include "c8s.attestationApiSocketPresent" . -}}
 {{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
 {{- end -}}
 {{- $extraArgs := include "router.getCertCommonArgs" . | fromYamlArray -}}
+{{- $sanFile := "" -}}
+{{- if .Values.node.baked -}}
+{{- $mounts = append $mounts (include "c8s.nodeConfigMount" . | trim) -}}
+{{- $extraArgs = append $extraArgs "--image-policy-file=/run/c8s-node/cds.json" -}}
+{{- $sanFile = "/run/c8s-node/tls-san" -}}
+{{- end -}}
 {{- if .Values.router.attest.expectedWorkload -}}
 
 {{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
@@ -595,6 +602,7 @@ list.
 {{- include "c8s.getCertContainers" (dict
   "root" .
   "san" (include "router.san" .)
+  "sanFile" $sanFile
   "certOut" (printf "%s/cert.pem" .Values.router.tlsMountPath)
   "keyOut" (printf "%s/key.pem" .Values.router.tlsMountPath)
   "caOut" (printf "%s/ca.pem" .Values.router.tlsMountPath)

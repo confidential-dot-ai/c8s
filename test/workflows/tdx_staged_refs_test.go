@@ -1,93 +1,183 @@
 package workflows
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
-// Run the production staged-ref step with kubectl replaced at its boundary.
+// Resolve the selected commit's CDI disk and attestation tuple through the
+// production registry code, replacing only curl at its process boundary.
 func TestTDXStagedImageRefs(t *testing.T) {
 	var action lifecycleDocument
 	readYAML(t, "../../.github/actions/tdx-metal-e2e/action.yml", &action)
-	var script string
+	var resolve workflowStep
 	for _, step := range action.Runs.Steps {
-		if step.Name == "resolve image refs + the paired c8s ref" {
-			script = step.Run
+		if step.Name == "resolve the node image built from the commit under test" {
+			resolve = step
 		}
 	}
-	if script == "" {
+	if resolve.Run == "" || resolve.If != "inputs.exact_image != 'true'" {
 		t.Fatal("missing staged image-ref resolution step")
 	}
-
-	fixture := t.TempDir()
-	kubectl := `#!/usr/bin/env bash
-set -euo pipefail
-[[ $# == 7 && $1 == -n && $2 == confai-images && $3 == get &&
-   $4 == cm && $5 == tdx-rke2-image-refs && $6 == -o ]] || exit 1
-[[ $7 != "jsonpath={.data.$FIXTURE_MISSING}" ]] || exit 0
-case "$7" in
-  'jsonpath={.data.image}') printf '%s' 'ghcr.io/confidential-dot-ai/node-guest-base:staged' ;;
-  'jsonpath={.data.rootPvc}') printf '%s' 'staged-root' ;;
-  'jsonpath={.data.mrtd}') printf '%096d' 0 ;;
-  'jsonpath={.data.rtmr1}') printf '%096d' 1 ;;
-  'jsonpath={.data.rtmr2}') printf '%096d' 2 ;;
-  'jsonpath={.data.c8sRef}') printf '%s' 'abcdef0' ;;
-  'jsonpath={.data.launchConfigVersion}') printf '%s' "$FIXTURE_LAUNCH_VERSION" ;;
-  'jsonpath={.data.imageTag}') printf '%s' "$FIXTURE_IMAGE_TAG" ;;
-  *) exit 1 ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(fixture, "kubectl"), []byte(kubectl), 0o755); err != nil {
-		t.Fatal(err)
+	const repository = "ghcr.io/confidential-dot-ai/node-guest-base"
+	if resolve.Env["IMAGE_REPO"] != repository {
+		t.Fatalf("unexpected image repository: %v", resolve.Env)
 	}
-
-	for _, tc := range []struct {
-		name, imageTag, override, missing, version string
-	}{
-		{"tag present", "rke2-tdx-manifest", "", "", "c8s-launch/v2"},
-		{"tag absent", "", "", "", "c8s-launch/v2"},
-		{"tag present with override", "rke2-tdx-manifest", "caller-ref", "", "c8s-launch/v2"},
-		{"tag absent with override", "", "caller-ref", "", "c8s-launch/v2"},
-		{"required measurement missing", "rke2-tdx-manifest", "caller-ref", "mrtd", "c8s-launch/v2"},
-		{"launch version missing", "", "", "launchConfigVersion", ""},
-		{"legacy image", "", "", "", "legacy"},
-		{"plaintext-token image", "", "", "", "c8s-launch/v1"},
-	} {
+	fixture := t.TempDir()
+	write := func(path, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(fixture, "bin/retry.sh"), "retry() { \"$@\"; }\n", 0o644)
+	write(filepath.Join(fixture, "bin/curl"), `#!/usr/bin/env bash
+set -euo pipefail
+url= output= head=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--max-time) shift 2 ;;
+    -o) output=$2; shift 2 ;;
+    -sI) head=true; shift ;;
+    -fsSL) shift ;;
+    https://*) url=$1; shift ;;
+    *) echo "unexpected curl argument: $1" >&2; exit 1 ;;
+  esac
+done
+printf '%s\n' "$url" >> "$FIXTURE_REQUESTS"
+base=https://ghcr.io/v2/confidential-dot-ai/node-guest-base
+case "$url" in
+  'https://ghcr.io/token?scope=repository:confidential-dot-ai/node-guest-base:pull')
+    printf '%s\n' '{"token":"fixture-token"}' ;;
+  "$base/manifests/rke2-tdx-cdi-abcdef0")
+    [[ $head == true ]] || exit 1
+    printf 'HTTP/1.1 %s fixture\r\nDocker-Content-Digest: %s\r\n\r\n' "$FIXTURE_IMAGE_STATUS" "$FIXTURE_IMAGE_DIGEST" ;;
+  "$base/manifests/rke2-tdx-abcdef0") cat "$FIXTURE_ORAS" ;;
+  "$base/blobs/$FIXTURE_LAYER_DIGEST")
+    [[ $output == "$FIXTURE_BLOB_OUTPUT" ]] || exit 1
+    cp "$FIXTURE_MANIFEST" "$output" ;;
+  *) echo "unexpected registry request: $url" >&2; exit 1 ;;
+esac
+`, 0o755)
+	type testCase struct {
+		name, field, value                                    string
+		missing, noImage, badDigest, duplicate, wrongPlatform bool
+	}
+	cases := []testCase{
+		{name: "complete tuple"},
+		{name: "image not published", noImage: true},
+		{name: "invalid image digest", badDigest: true},
+		{name: "duplicate manifest layers", duplicate: true},
+		{name: "wrong manifest platform", wrongPlatform: true},
+	}
+	for _, field := range []string{"mrtd", "rtmr1", "rtmr2"} {
+		cases = append(cases,
+			testCase{name: "missing " + field, field: field, missing: true},
+			testCase{name: "uppercase " + field, field: field, value: strings.Repeat("A", 96)},
+			testCase{name: "short " + field, field: field, value: strings.Repeat("a", 95)},
+			testCase{name: "nonhex " + field, field: field, value: strings.Repeat("g", 96)})
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			output := filepath.Join(t.TempDir(), "environment")
-			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(),
-				"PATH="+fixture+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"NS=confai-images", "REFS_CM=tdx-rke2-image-refs",
-				"GITHUB_ENV="+output, "C8S_REF_OVERRIDE="+tc.override,
-				"FIXTURE_IMAGE_TAG="+tc.imageTag, "FIXTURE_MISSING="+tc.missing,
-				"FIXTURE_LAUNCH_VERSION="+tc.version)
-			log, err := cmd.CombinedOutput()
-			if tc.missing != "" {
-				if err == nil || !strings.Contains(string(log), "missing '"+tc.missing+"'") {
-					t.Fatalf("missing required ref was not rejected: err=%v log=%s", err, log)
-				}
-				return
+			output := t.TempDir()
+			tuple := map[string]string{
+				"mrtd": strings.Repeat("a", 96), "rtmr1": strings.Repeat("b", 96), "rtmr2": strings.Repeat("c", 96),
 			}
-			if tc.version != "c8s-launch/v2" {
-				if err == nil || !strings.Contains(string(log), "invalid 'launchConfigVersion'") {
-					t.Fatalf("legacy image was not rejected: err=%v log=%s", err, log)
+			if tc.field != "" {
+				if tc.missing {
+					delete(tuple, tc.field)
+				} else {
+					tuple[tc.field] = tc.value
+				}
+			}
+			platform := "tdx"
+			if tc.wrongPlatform {
+				platform = "snp"
+			}
+			manifest, err := json.Marshal(map[string]any{"version": 3, "build": map[string]string{"platform": platform}, "tdx": tuple})
+			if err != nil {
+				t.Fatal(err)
+			}
+			layerDigest := "sha256:" + strings.Repeat("b", 64)
+			layer := map[string]any{"digest": layerDigest, "annotations": map[string]string{"org.opencontainers.image.title": "manifest.json"}}
+			layers := []any{layer}
+			if tc.duplicate {
+				layers = append(layers, layer)
+			}
+			oras, err := json.Marshal(map[string]any{"layers": layers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(filepath.Join(output, "manifest.json"), string(manifest), 0o644)
+			write(filepath.Join(output, "oras.json"), string(oras), 0o644)
+			status, imageDigest := "200", "sha256:"+strings.Repeat("a", 64)
+			if tc.noImage {
+				status = "404"
+			}
+			if tc.badDigest {
+				imageDigest = "sha256:invalid"
+			}
+			blobOutput := filepath.Join(output, "downloaded manifest.json")
+			script := strings.ReplaceAll(resolve.Run, "/tmp/image-manifest.json", "'"+strings.ReplaceAll(blobOutput, "'", "'\"'\"'")+"'")
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", "-c", script)
+			cmd.Env = append(os.Environ(),
+				"PATH="+filepath.Join(fixture, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"IMAGE_REPO="+repository, "c8sRef=abcdef0", "GITHUB_WORKSPACE="+fixture,
+				"GITHUB_ENV="+filepath.Join(output, "environment"),
+				"FIXTURE_IMAGE_STATUS="+status, "FIXTURE_IMAGE_DIGEST="+imageDigest,
+				"FIXTURE_ORAS="+filepath.Join(output, "oras.json"), "FIXTURE_MANIFEST="+filepath.Join(output, "manifest.json"),
+				"FIXTURE_LAYER_DIGEST="+layerDigest, "FIXTURE_BLOB_OUTPUT="+blobOutput,
+				"FIXTURE_REQUESTS="+filepath.Join(output, "requests"))
+			log, err := cmd.CombinedOutput()
+			raw, readErr := os.ReadFile(filepath.Join(output, "environment"))
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+			if tc.name != "complete tuple" {
+				if err == nil || len(raw) != 0 {
+					t.Fatalf("invalid image metadata was exported: err=%v env=%q log=%s", err, raw, log)
+				}
+				diagnostic := "not a TDX node image manifest"
+				if tc.noImage {
+					diagnostic = "no node image for the commit under test"
+				} else if tc.badDigest {
+					diagnostic = "ghcr answered"
+				} else if tc.duplicate {
+					diagnostic = "expected one manifest.json layer"
+				}
+				if !strings.Contains(string(log), diagnostic) {
+					t.Fatalf("image metadata failed at the wrong boundary: want %q log=%s", diagnostic, log)
+				}
+				if tc.noImage {
+					requests, readErr := os.ReadFile(filepath.Join(output, "requests"))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					want := "https://ghcr.io/token?scope=repository:confidential-dot-ai/node-guest-base:pull\n" +
+						"https://ghcr.io/v2/confidential-dot-ai/node-guest-base/manifests/rke2-tdx-cdi-abcdef0\n"
+					if string(requests) != want || !strings.Contains(string(log), "no node image for the commit under test") {
+						t.Fatalf("missing image was not rejected without fallback: requests=%q log=%s", requests, log)
+					}
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("resolve staged refs: %v\n%s", err, log)
 			}
-			raw, err := os.ReadFile(output)
-			if err != nil {
-				t.Fatal(err)
-			}
 			got := make(map[string]string)
-			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
 				key, value, ok := strings.Cut(line, "=")
 				if !ok {
 					t.Fatalf("invalid environment assignment %q", line)
@@ -95,16 +185,8 @@ esac
 				got[key] = value
 			}
 			want := map[string]string{
-				"image": "ghcr.io/confidential-dot-ai/node-guest-base:staged", "rootPvc": "staged-root",
-				"mrtd": strings.Repeat("0", 96), "rtmr1": strings.Repeat("0", 95) + "1",
-				"rtmr2": strings.Repeat("0", 95) + "2", "c8sRef": "abcdef0",
-				"launchConfigVersion": "c8s-launch/v2",
-			}
-			if tc.imageTag != "" {
-				want["imageTag"] = tc.imageTag
-			}
-			if tc.override != "" {
-				want["c8sRef"] = tc.override
+				"image": repository + "@" + imageDigest, "rootPvc": "c8s-root-" + strings.Repeat("a", 12),
+				"mrtd": tuple["mrtd"], "rtmr1": tuple["rtmr1"], "rtmr2": tuple["rtmr2"],
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("staged environment: got %v, want %v", got, want)

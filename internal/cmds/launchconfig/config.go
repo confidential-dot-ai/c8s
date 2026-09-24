@@ -12,18 +12,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/confidential-dot-ai/attestation-go/remote"
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"io"
 	"net/netip"
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -51,33 +50,75 @@ const (
 )
 
 // Document is the public signed launch.yaml wire contract. Join credentials
-// are generated inside the guest and never accepted from launch media.
+// are generated inside the guest and never accepted from launch media: the
+// server mints its agent token in RAM and RKE2 generates its own server
+// token, so no field here carries a secret.
 type Document struct {
-	SchemaVersion           string       `yaml:"schemaVersion" json:"schemaVersion"`
-	ClusterID               string       `yaml:"clusterID" json:"clusterID"`
+	SchemaVersion           string       `yaml:"schemaVersion" json:"schema_version"`
+	ClusterID               string       `yaml:"clusterID" json:"cluster_id"`
 	Role                    Role         `yaml:"role" json:"role"`
 	Image                   Image        `yaml:"image" json:"image"`
 	Node                    Node         `yaml:"node" json:"node"`
 	Server                  ServerConfig `yaml:"server" json:"server"`
-	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agentOperatorPublicKeys"`
-	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tlsSAN"`
+	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agent_operator_public_keys"`
+	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tls_san"`
 	// Workloads is an optional strict c8s.allowlist/v1 JSON document. Keeping
 	// its existing wire schema avoids an independent YAML policy language.
 	Workloads string `yaml:"workloads,omitempty" json:"workloads,omitempty"`
 }
 
-// Image pins this boot's complete software identity; RTMR[0] varies by VM
-// shape and RTMR[3] binds its launch key, so neither belongs in these pins.
+// Image pins this boot's complete software identity. Platform names which
+// imagePlatform owns the rest: Measurement is the launch digest every platform
+// has, and RTMRs is the register map only some of them populate. RTMR[0] varies
+// by VM shape and RTMR[3] binds the launch key, so neither belongs in the pins.
 type Image struct {
 	Platform    string         `yaml:"platform" json:"platform"`
 	Measurement string         `yaml:"measurement" json:"measurement"`
 	RTMRs       map[int]string `yaml:"rtmrs,omitempty" json:"rtmrs,omitempty"`
 }
 
+// imagePlatform keeps each TEE's register rules in one place, so the shared
+// verify, validate and policy paths ask the platform instead of testing for
+// "tdx" inline. Adding a platform means adding an entry, not new branches.
+type imagePlatform struct {
+	family teetypes.Family
+	// validateRegisters rejects a register map that does not match what this
+	// platform measures. Its error names the platform's own rule.
+	validateRegisters func(rtmrs map[int]string) error
+}
+
+var imagePlatforms = map[string]imagePlatform{
+	"tdx": {
+		family: teetypes.FamilyTDX,
+		validateRegisters: func(rtmrs map[int]string) error {
+			if len(rtmrs) != 2 || !registerHex(rtmrs[1]) || !registerHex(rtmrs[2]) {
+				return fmt.Errorf("TDX image must pin exactly RTMR[1] and RTMR[2]")
+			}
+			return nil
+		},
+	},
+	"snp": {
+		family: teetypes.FamilySNP,
+		validateRegisters: func(rtmrs map[int]string) error {
+			if len(rtmrs) != 0 {
+				return fmt.Errorf("SNP image cannot carry RTMR pins")
+			}
+			return nil
+		},
+	},
+}
+
+// platform resolves the document's launch tag. Callers reach it only after
+// validate, which rejects any tag without an entry here.
+func (i Image) platform() (imagePlatform, bool) {
+	p, ok := imagePlatforms[i.Platform]
+	return p, ok
+}
+
 type Node struct {
 	Name       string `yaml:"name" json:"name"`
 	IP         string `yaml:"ip,omitempty" json:"ip,omitempty"`
-	ExternalIP string `yaml:"externalIP,omitempty" json:"externalIP,omitempty"`
+	ExternalIP string `yaml:"externalIP,omitempty" json:"external_ip,omitempty"`
 }
 
 type ServerConfig struct {
@@ -85,7 +126,7 @@ type ServerConfig struct {
 	Address string `yaml:"address,omitempty" json:"address"`
 	// Exact PEM bytes are hardware-bound. Equivalent PEM encodings of one
 	// key are still one authorization identity, not two different roles.
-	OperatorPublicKey string `yaml:"operatorPublicKey" json:"operatorPublicKey"`
+	OperatorPublicKey string `yaml:"operatorPublicKey" json:"operator_public_key"`
 }
 
 // Config selects trusted local facilities and launch files. RootDir rebases
@@ -98,7 +139,7 @@ type Config struct {
 	RootDir           string
 }
 
-var loadMeasuredOperatorKeyAndOwnMeasurement = credrelease.LoadMeasuredOperatorKeyAndOwnMeasurement
+var loadMeasuredIdentity = credrelease.LoadMeasuredIdentity
 
 // Verified is created only after signature, image and role authorization pass.
 // Its fields are private so staging cannot accidentally consume an unverified
@@ -134,13 +175,14 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	}
 	// credrelease compares against the verified report's family ("sev-snp",
 	// "tdx"), not the launch tag ("snp", "tdx").
-	pub, pubErr, digest, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, string(platform.Family()), api)
+	measured, err := loadMeasuredIdentity(ctx, string(platform.Family()), api)
 	if err != nil {
 		return nil, fmt.Errorf("verify this boot's identity: %w", err)
 	}
-	if pubErr != nil {
-		return nil, fmt.Errorf("launch configuration requires a measured operator key: %w", pubErr)
+	if measured.OperatorKeyErr != nil {
+		return nil, fmt.Errorf("launch configuration requires a measured operator key: %w", measured.OperatorKeyErr)
 	}
+	pub := measured.OperatorKey
 	key, err := parseLaunchKey(string(pub))
 	if err != nil {
 		return nil, fmt.Errorf("measured launch key: %w", err)
@@ -155,11 +197,21 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	if teetypes.NormalizePlatform(doc.Image.Platform) != platform {
 		return nil, fmt.Errorf("launch image platform does not match this boot")
 	}
-	if !bytes.Equal(mustDecodeHex(doc.Image.Measurement), digest) {
+	if measured.Image == nil {
+		return nil, fmt.Errorf("verified self-report contains no image identity")
+	}
+	digests := measured.Image.LaunchDigests()
+	if len(digests) == 0 {
+		return nil, fmt.Errorf("verified self-report contains no launch digests")
+	}
+	digest := digests[0].Digest
+	if !bytes.Equal(mustDecodeHex(doc.Image.Measurement), digest[:]) {
 		return nil, fmt.Errorf("launch image measurement does not match this boot")
 	}
+	rtmrs := measured.Image.RTMRs()
 	for i, value := range doc.Image.RTMRs {
-		if !bytes.Equal(mustDecodeHex(value), rtmrs[i]) {
+		observed, ok := rtmrs[i]
+		if !ok || !bytes.Equal(mustDecodeHex(value), observed[:]) {
 			return nil, fmt.Errorf("launch image RTMR[%d] does not match this boot", i)
 		}
 	}
@@ -176,76 +228,6 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	}, nil
 }
 
-// Parse strictly validates the offline launch document. Guest callers must
-// use Verify first; Parse alone provides no authentication.
-func Parse(data []byte) (*Document, error) {
-	if len(data) == 0 || len(data) > MaxDocumentSize {
-		return nil, fmt.Errorf("launch configuration must contain 1..%d bytes", MaxDocumentSize)
-	}
-	var tree yaml.Node
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&tree); err != nil {
-		return nil, fmt.Errorf("parse launch YAML: %w", err)
-	}
-	if err := singleDocument(dec); err != nil {
-		return nil, err
-	}
-	if err := checkYAML(&tree, 0); err != nil {
-		return nil, err
-	}
-	dec = yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	var doc Document
-	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("decode launch configuration: %w", err)
-	}
-	if err := doc.validate(); err != nil {
-		return nil, err
-	}
-	return &doc, nil
-}
-
-func singleDocument(dec *yaml.Decoder) error {
-	var extra yaml.Node
-	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("launch configuration must contain exactly one YAML document")
-	}
-	return nil
-}
-
-func checkYAML(n *yaml.Node, depth int) error {
-	if depth > 32 {
-		return fmt.Errorf("launch YAML nesting exceeds 32 levels")
-	}
-	if n.Kind == yaml.AliasNode || n.Anchor != "" {
-		return fmt.Errorf("launch YAML anchors and aliases are forbidden")
-	}
-	if n.Kind == yaml.MappingNode {
-		seen := make(map[string]bool)
-		for i := 0; i < len(n.Content); i += 2 {
-			k := n.Content[i]
-			if k.Kind != yaml.ScalarNode || k.Value == "<<" {
-				return fmt.Errorf("invalid launch YAML mapping key")
-			}
-			// Integer keys occur only in the RTMR map. Alternative spellings
-			// such as 01 and 1 must not collapse to one int after review.
-			if k.Tag != "!!str" && (k.Tag != "!!int" || (k.Value != "1" && k.Value != "2")) {
-				return fmt.Errorf("noncanonical launch YAML mapping key")
-			}
-			if seen[k.Value] {
-				return fmt.Errorf("duplicate launch YAML key %q", k.Value)
-			}
-			seen[k.Value] = true
-		}
-	}
-	for _, child := range n.Content {
-		if err := checkYAML(child, depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (d *Document) validate() error {
 	if d.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schemaVersion must be %s", SchemaVersion)
@@ -259,18 +241,15 @@ func (d *Document) validate() error {
 	if d.Role != Server && d.Role != Agent {
 		return fmt.Errorf("role must be server or agent")
 	}
-	if d.Image.Platform != "tdx" && d.Image.Platform != "snp" {
+	platform, ok := d.Image.platform()
+	if !ok {
 		return fmt.Errorf("image.platform must be tdx or snp")
 	}
 	if !registerHex(d.Image.Measurement) {
 		return fmt.Errorf("image.measurement must be 96 lowercase hex characters")
 	}
-	if d.Image.Platform == "tdx" {
-		if len(d.Image.RTMRs) != 2 || !registerHex(d.Image.RTMRs[1]) || !registerHex(d.Image.RTMRs[2]) {
-			return fmt.Errorf("TDX image must pin exactly RTMR[1] and RTMR[2]")
-		}
-	} else if len(d.Image.RTMRs) != 0 {
-		return fmt.Errorf("SNP image cannot carry RTMR pins")
+	if err := platform.validateRegisters(d.Image.RTMRs); err != nil {
+		return err
 	}
 	if d.Server.Address != "" || d.Role == Agent {
 		if err := ValidateIPv4(d.Server.Address, true); err != nil {
@@ -336,7 +315,10 @@ func (d *Document) validate() error {
 }
 
 func (d *Document) authorizeKey(pub []byte, key *ecdsa.PublicKey) error {
-	server, _ := parseLaunchKey(d.Server.OperatorPublicKey) // validated above
+	server, err := parseLaunchKey(d.Server.OperatorPublicKey)
+	if err != nil {
+		return fmt.Errorf("parse server operator public key: %w", err)
+	}
 	if d.Role == Server {
 		if !bytes.Equal(pub, []byte(d.Server.OperatorPublicKey)) {
 			return fmt.Errorf("server launch key does not match server.operatorPublicKey bytes")
@@ -410,11 +392,11 @@ func readBounded(path string, limit int64) ([]byte, error) {
 }
 
 func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
-	tee := teetypes.FamilySNP
-	if d.Image.Platform == "tdx" {
-		tee = teetypes.FamilyTDX
+	platform, ok := d.Image.platform()
+	if !ok {
+		return refvalues.ReferenceValues{}, fmt.Errorf("image.platform must be tdx or snp")
 	}
-	pins := refvalues.ReferenceValues{Family: tee}
+	pins := refvalues.ReferenceValues{Family: platform.family}
 	keys := append([]string{d.Server.OperatorPublicKey}, d.AgentOperatorPublicKeys...)
 	for i, pub := range keys {
 		name := "server"
@@ -423,9 +405,9 @@ func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
 		}
 		entry := remote.ImagePin{Name: name, Digest: mustDecodeHex(d.Image.Measurement), Anchor: []byte(pub)}
 		if len(d.Image.RTMRs) > 0 {
-			entry.RTMRs = make(map[int][]byte, len(d.Image.RTMRs))
+			entry.Registers = make(map[int][]byte, len(d.Image.RTMRs))
 			for idx, digest := range d.Image.RTMRs {
-				entry.RTMRs[idx] = mustDecodeHex(digest)
+				entry.Registers[idx] = mustDecodeHex(digest)
 			}
 		}
 		pins.Images = append(pins.Images, entry)

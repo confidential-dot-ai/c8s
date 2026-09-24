@@ -24,6 +24,7 @@ const ExplainRoute = "/secrets-explain/{sandboxID}"
 // release path drops it as a platform-injected one.
 type ReportedContainer struct {
 	Env      *pkgallowlist.EnvObservation `json:"env,omitempty"`
+	Mounts   []pkgallowlist.ObservedMount `json:"mounts"`
 	Digest   string                       `json:"digest"`
 	Argv     []string                     `json:"argv"`
 	Injected bool                         `json:"injected"`
@@ -155,17 +156,16 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 		return resp
 	}
 
-	var candidates []pkgallowlist.RunningContainer
 	for _, c := range reported {
 		injected := isInjected(al, c)
-		entry := ReportedContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env, Injected: injected}
+		entry := ReportedContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env, Mounts: c.Mounts, Injected: injected}
 		resp.Reported = append(resp.Reported, entry)
 		if injected {
 			continue
 		}
 		resp.Candidates = append(resp.Candidates, entry)
-		candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env})
 	}
+	candidates := WorkloadContainers(al, reported)
 	if len(candidates) == 0 {
 		resp.Refusal = "every container the sandbox reports is a platform-injected one, so there is nothing to match"
 		return resp
@@ -180,7 +180,7 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 			HasGrant: al.Workloads[name].Secrets != nil,
 		}
 		for _, f := range d.Foreign {
-			v.Foreign = append(v.Foreign, ReportedContainer{Digest: f.Digest, Argv: f.Argv, Env: f.Env})
+			v.Foreign = append(v.Foreign, ReportedContainer{Digest: f.Digest, Argv: f.Argv, Env: f.Env, Mounts: f.Mounts})
 		}
 		for _, m := range d.MissingMains {
 			v.MissingMains = append(v.MissingMains, MissingContainer{Digest: m.Digest.String(), Image: m.Image})

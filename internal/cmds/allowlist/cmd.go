@@ -18,23 +18,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
-// defaultRequiredComponents are the core c8s components an allowlist is expected
-// to cover. `upload` warns (and requires --force) when an uploaded file names
-// none of these, since a cluster missing them cannot pull its own control plane.
-//
-// Each entry is a case-insensitive substring matched against the image
-// references in the uploaded allowlist (see missingComponents). They are chosen
-// to match the chart image repositories: "cds", "ratls-mesh",
-// "nri-image-policy", and "attestation-api" are the component repo basenames,
-// and "nginx" deliberately stays loose because the router image is the
-// third-party "nginxinc/nginx-unprivileged" — a tighter needle would miss it.
-// TestMissingComponentsMatchesRealChartImages pins these against the real repos.
+// Required image-label substrings for deployments with a chart-managed attestation API.
 var defaultRequiredComponents = []string{
 	"cds",
 	"ratls-mesh",
@@ -52,12 +41,12 @@ type options struct {
 
 // NewCmd returns the `c8s allowlist` command tree.
 func NewCmd() *cobra.Command {
-	return newCmd(localverify.Verify)
+	return newCmd(nil)
 }
 
 // newCmd is the injectable constructor behind NewCmd.
-func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{Options: cdsconn.Options{Verify: verify}}
+func newCmd(verifier cdsconn.PinVerifier) *cobra.Command {
+	o := &options{Options: cdsconn.Options{Verifier: verifier}}
 	cmd := &cobra.Command{
 		Use:   "allowlist",
 		Short: "Manage the CDS image allowlist",

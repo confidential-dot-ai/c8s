@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -34,7 +33,6 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -57,6 +55,7 @@ type config struct {
 	KeyPath                string
 	KeyOutPath             string
 	SAN                    string
+	SANFile                string
 	Verbose                bool
 	RenewInterval          time.Duration
 	RenewJitterPercent     int
@@ -122,8 +121,7 @@ alongside a workload that uses the obtained certificate.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "path to the complete CDS image and operator identity policy")
-	flags.StringVar(&cfg.MeasurementsConfigJSON, "measurements-config-json", "", "inline complete CDS image and operator identity policy")
+	cmdsutil.BindImagePolicyFlags(flags, &cfg.MeasurementsConfig, &cfg.MeasurementsConfigJSON, "", "pins the CDS endpoint; excludes --cds-measurements and --cds-rtmrs")
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
 	flags.StringVar(&cfg.CDSRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> CDS's RA-TLS cert must additionally satisfy; ignored when CDS presents SNP evidence (empty = launch-digest pinning only)")
@@ -133,6 +131,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
 	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM with mode 0600 (0640 in shared setgid directories; key reused on restart); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
+	flags.StringVar(&cfg.SANFile, "san-file", "", "Path to a file containing the certificate SAN; mutually exclusive with --san")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
 	flags.IntVar(&cfg.RenewJitterPercent, "renew-jitter-percent", defaultRenewJitterPercent, "Shorten each renewal delay by a random fraction of itself, up to this percent, so certificates issued together do not refresh in lockstep (0 = no jitter)")
@@ -153,7 +152,8 @@ alongside a workload that uses the obtained certificate.`,
 
 	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
-	_ = cmd.MarkFlagRequired("san")
+	cmd.MarkFlagsOneRequired("san", "san-file")
+	cmd.MarkFlagsMutuallyExclusive("san", "san-file")
 
 	return cmd
 }
@@ -202,32 +202,24 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 }
 
 func cdsPins(cfg config) (ratls.Pins, error) {
-	if cfg.MeasurementsConfig != "" || cfg.MeasurementsConfigJSON != "" {
-		if cfg.CDSMeasurements != "" || cfg.CDSRTMRs != "" {
-			return ratls.Pins{}, fmt.Errorf("a measurements config cannot be combined with --cds-measurements or --cds-rtmrs")
-		}
-		set, err := cmdsutil.LoadMeasurementsSource(cfg.MeasurementsConfig, cfg.MeasurementsConfigJSON)
-		if err != nil {
-			return ratls.Pins{}, err
-		}
-		return ratls.Pins(set.Policy()), nil
-	}
-	measurements, err := refvalues.ParseHexMeasurements(cfg.CDSMeasurements)
+	policy, err := (cmdsutil.ImagePolicySource{File: cfg.MeasurementsConfig, JSON: cfg.MeasurementsConfigJSON}).Load(
+		cmdsutil.MeasurementPinsFromStrings(cfg.CDSMeasurements, cfg.CDSRTMRs, "cds-"))
 	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("--cds-measurements: %w", err)
+		return ratls.Pins{}, err
 	}
-	cmdsutil.WarnIfCDSUnpinned(len(measurements), "--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
-	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
-	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("--cds-rtmrs: %w", err)
-	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	cmdsutil.WarnIfCDSUnpinned(len(policy.Measurements)+len(policy.Images), "--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
+	return ratls.Pins(policy), nil
 }
 
 // obtainCertFn is a var so renewal-loop tests can observe attempts.
 var obtainCertFn = obtainCert
 
 func run(cfg config) error {
+	san, err := resolveSAN(cfg.SAN, cfg.SANFile)
+	if err != nil {
+		return err
+	}
+	cfg.SAN = san
 	slog.Info("starting get-cert", "san", cfg.SAN)
 
 	if err := validateConfig(cfg); err != nil {
@@ -696,9 +688,23 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-// hostnameLabelRe matches a valid RFC 1123 hostname label: alphanumeric, hyphens
-// allowed in the middle, 1-63 characters.
-var hostnameLabelRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+// resolveSAN loads the configured identity once, before network or output work.
+func resolveSAN(san, path string) (string, error) {
+	if path != "" {
+		if san != "" {
+			return "", fmt.Errorf("--san and --san-file are mutually exclusive")
+		}
+		var err error
+		san, err = cmdsutil.ReadSANFile("--san-file", path)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := validateSAN(san); err != nil {
+		return "", fmt.Errorf("certificate SAN: %w", err)
+	}
+	return san, nil
+}
 
 // validateSAN checks that a SAN is a valid IP address or RFC 1123 hostname.
 func validateSAN(san string) error {
@@ -715,21 +721,7 @@ func validateSAN(san string) error {
 	if strings.Contains(san, "*") {
 		return fmt.Errorf("'%s' contains a wildcard - wildcards are not supported", san)
 	}
-	return validateHostname(san)
-}
-
-// validateHostname checks that s is a valid RFC 1123 hostname.
-func validateHostname(s string) error {
-	if len(s) > 253 {
-		return fmt.Errorf("'%s' exceeds maximum hostname length of 253 characters", s)
-	}
-	labels := strings.Split(s, ".")
-	for _, label := range labels {
-		if !hostnameLabelRe.MatchString(label) {
-			return fmt.Errorf("'%s' is not a valid RFC 1123 hostname", s)
-		}
-	}
-	return nil
+	return cmdsutil.ValidateDNSName(san)
 }
 
 // isIPSAN returns true if the SAN is an IP address.

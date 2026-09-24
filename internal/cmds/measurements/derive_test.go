@@ -56,7 +56,7 @@ func TestDeriveSNPEntryPerVariant(t *testing.T) {
 		}
 	}
 	for _, e := range set.Images {
-		if len(e.RTMRs) != 0 {
+		if len(e.Registers) != 0 {
 			t.Errorf("SNP entry %s carries RTMR pins", e.Name)
 		}
 	}
@@ -81,15 +81,15 @@ func TestDeriveTDXPinsTheTuple(t *testing.T) {
 	if e.Name != "c8s-broker" {
 		t.Errorf("name = %q, want the image directory name", e.Name)
 	}
-	if _, pinned := e.RTMRs[0]; pinned {
+	if _, pinned := e.Registers[0]; pinned {
 		t.Error("RTMR[0] pinned: it varies with vCPU and memory shape")
 	}
-	if _, pinned := e.RTMRs[3]; pinned {
+	if _, pinned := e.Registers[3]; pinned {
 		t.Error("RTMR[3] pinned: it is extended by in-guest software")
 	}
 	for _, idx := range []int{1, 2} {
-		if len(e.RTMRs[idx]) != refvalues.DigestSize {
-			t.Errorf("RTMR[%d] = %d bytes, want %d", idx, len(e.RTMRs[idx]), refvalues.DigestSize)
+		if len(e.Registers[idx]) != refvalues.DigestSize {
+			t.Errorf("RTMR[%d] = %d bytes, want %d", idx, len(e.Registers[idx]), refvalues.DigestSize)
 		}
 	}
 }

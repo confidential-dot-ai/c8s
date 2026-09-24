@@ -143,8 +143,7 @@ func TestVerifyRejectsTamperedEvidence(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("rejection = %q, want cause %q", err, tc.wantErr)
 			}
-			var ce *CollateralError
-			if errors.As(err, &ce) {
+			if _, ok := errors.AsType[*CollateralError](err); ok {
 				t.Fatalf("tampered evidence classified as CollateralError (exit 3, no verdict): %v", err)
 			}
 		})
@@ -159,11 +158,11 @@ func TestEnforceResult(t *testing.T) {
 	good := func() *teetypes.VerificationResult {
 		return &teetypes.VerificationResult{
 			SignatureValid:  true,
-			ReportDataMatch: teetypes.Ptr(true),
+			ReportDataMatch: new(true),
 			Claims:          teetypes.Claims{LaunchDigest: digest},
 		}
 	}
-	anchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("nonce")}}
+	anchor := Params{ExpectedReportData: []byte("nonce")}
 
 	t.Run("passing verdict", func(t *testing.T) {
 		if err := enforceResult(good(), anchor); err != nil {
@@ -189,7 +188,7 @@ func TestEnforceResult(t *testing.T) {
 
 	t.Run("report_data mismatch", func(t *testing.T) {
 		res := good()
-		res.ReportDataMatch = teetypes.Ptr(false)
+		res.ReportDataMatch = new(false)
 		if err := enforceResult(res, anchor); err == nil || !strings.Contains(err.Error(), "REPORTDATA") {
 			t.Fatalf("want REPORTDATA rejection, got %v", err)
 		}
@@ -224,7 +223,7 @@ func TestEnforceResult(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := enforceResult(good(), Params{Measurements: [][]byte{m}, VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("nonce")}}); err != nil {
+		if err := enforceResult(good(), Params{Measurements: [][]byte{m}, ExpectedReportData: []byte("nonce")}); err != nil {
 			t.Fatalf("want nil, got %v", err)
 		}
 	})

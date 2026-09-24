@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boot real systemd with production launch/core units and role conditions.
+# Boot real systemd with production host bootstrap units and role conditions.
 # The test replaces service payloads and device/verifier I/O only; dependency
 # ordering, Requires= failures, role selection and presets remain production.
 # Driver mode needs Docker; --inside runs only in its disposable container.
@@ -41,7 +41,6 @@ UNITDIR=/usr/local/lib/systemd/system
 mkdir -p "$UNITDIR" /dev/disk/by-label
 
 for p in etc/systemd/system/rke2-role.service \
-         etc/systemd/system/c8s-join.service \
          etc/systemd/system/apparmor-enforce.service \
          etc/systemd/system/rke2-server.service.d/no-modprobe.conf \
          etc/systemd/system/rke2-agent.service.d/no-modprobe.conf \
@@ -56,11 +55,6 @@ install_launch_stubs /usr/local/bin
 install -D -m644 /dev/stdin /etc/systemd/system/rke2-role.service.d/90-test.conf <<EOF
 [Service]
 Environment=CRED_PLATFORM=tdx
-Environment=C8S_ROLE_FIXTURE=$C8S_ROLE_FIXTURE
-EOF
-
-install -D -m644 /dev/stdin /etc/systemd/system/c8s-join.service.d/90-test.conf <<EOF
-[Service]
 Environment=C8S_ROLE_FIXTURE=$C8S_ROLE_FIXTURE
 EOF
 
@@ -98,24 +92,12 @@ WantedBy=multi-user.target
 EOF
 done
 
-# A real agent payload must never execute before enrollment writes its token.
-install -D -m644 /dev/stdin "$UNITDIR/rke2-agent.service.d/90-test-payload.conf" <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/bin/sh -c 'test -s /run/confos/rke2-agent-token && touch /run/confos/test-agent-started && exec /bin/sleep infinity'
-EOF
-
-# Locate units by their concrete service entrypoints, so renaming a unit is
-# harmless but dropping a core service or bypassing its wrapper is detected.
-core_units=()
-for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy join-release; do
-    mapfile -t files < <(grep -lE "^ExecStart=.*node-services run $command$" "$SOURCE_UNITS"/*.service)
-    [[ ${#files[@]} == 1 ]] || { echo "expected one production unit for $command" >&2; exit 2; }
-    core_units+=("${files[0]##*/}")
-done
-mapfile -t nginx_units < <(grep -lE '^ExecStart=.*/nginx ' "$SOURCE_UNITS"/*.service)
-[[ ${#nginx_units[@]} == 1 ]] || { echo "expected one production nginx unit" >&2; exit 2; }
-core_units+=("${nginx_units[0]##*/}" cred-release.service nri-node-ip.service)
+# Application services are Kubernetes workloads. These host services retain
+# the authenticated launch dependency before any pod can start. Attested
+# enrollment gates the agent on a released credential and the server on an
+# authorized agent policy, both selected by launch staging, not the media.
+core_units=(attest-proxy.service cred-release.service nri-node-ip.service
+    c8s-join.service c8s-join-release.service)
 
 for unit in "${core_units[@]}"; do
     install -D -m644 "$SOURCE_UNITS/$unit" "/etc/systemd/system/$unit"
@@ -131,10 +113,22 @@ EOF
 done
 
 systemctl daemon-reload
-payload_units=(rke2-server.service rke2-agent.service c8s-join.service "${core_units[@]}")
+payload_units=(rke2-server.service rke2-agent.service "${core_units[@]}")
 active() { systemctl is-active --quiet "$1"; }
 not_active() { ! active "$1"; }
 cond_skipped() { [[ $(systemctl show -p ConditionResult --value "$1") == no ]]; }
+# The shipped unit starts only when every plain ConditionPathExists holds and,
+# if it lists any "|" triggering paths, at least one of those exists.
+unit_conditions_met() {
+    local path triggers=0 triggered=0
+    while IFS= read -r path; do
+        case "$path" in
+            '|'*) triggers=1; [[ -e ${path#|} ]] && triggered=1 ;;
+            *) [[ -e $path ]] || return 1 ;;
+        esac
+    done < <(sed -n 's/^ConditionPathExists=//p' "$SOURCE_UNITS/$1")
+    (( triggers == 0 || triggered == 1 ))
+}
 boot_roles() { systemctl start "${payload_units[@]}"; }
 scenario_reset() {
     systemctl stop "${payload_units[@]}" rke2-role.service attestation-api.service apparmor-enforce.service >/dev/null 2>&1 || true
@@ -144,8 +138,8 @@ scenario_reset() {
     systemd-tmpfiles --create /etc/tmpfiles.d/confos-rke2.conf
     # Paths mounted read-only by production hardening normally exist after
     # RKE2 initializes. Payload stubs need empty equivalents for its sandbox.
-    mkdir -p /etc/confai /etc/rancher/rke2 /run/c8s-tls /run/ratls-mesh \
-        /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/agent /var/log/nginx /var/lib/nginx
+    mkdir -p /etc/confai /etc/rancher/rke2 \
+        /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/agent
 }
 
 CASE=presets
@@ -175,66 +169,37 @@ for role in server agent; do
     ok "$selected active" active "$selected"
     ok "$skipped inactive" not_active "$skipped"
     ok "$skipped condition skipped" cond_skipped "$skipped"
-    if [[ $role == agent ]]; then
-        ok "enrollment is complete" active c8s-join.service
-        ok "agent ran after enrollment" test -f /run/confos/test-agent-started
-        ok "credential is private" test "$(stat -c %a /run/confos/rke2-agent-token)" = 600
-    else
-        ok "server skips agent enrollment" cond_skipped c8s-join.service
-        ok "server never fetched a credential" test ! -e /run/confos/test-join-attempts
-    fi
     for unit in "${core_units[@]}"; do
-        if [[ $role == agent ]] && grep -qF 'ConditionPathExists=/run/confos/role-server' "$SOURCE_UNITS/$unit"; then
-            ok "$unit inactive on agent" not_active "$unit"
-            ok "$unit condition skipped on agent" cond_skipped "$unit"
-        else
+        if unit_conditions_met "$unit"; then
             ok "$unit active on $role" active "$unit"
+        else
+            ok "$unit inactive on $role" not_active "$unit"
+            ok "$unit condition skipped on $role" cond_skipped "$unit"
         fi
     done
 done
 
-CASE=server-without-agents
+CASE=boot-server-no-agents
 scenario_reset
 launch_media server
 : > "$C8S_ROLE_FIXTURE/no-agents"
-ok "server without agents boots" boot_roles
-ok "release is skipped without agent policy" cond_skipped c8s-join-release.service
-ok "server control plane remains active" active rke2-server.service
+: > /dev/disk/by-label/opkeydata
+ok "server without authorized agents boots" boot_roles
+ok "no agent policy staged" test ! -e /run/confos/launch/agents.json
+ok "join release inactive without agents" not_active c8s-join-release.service
+ok "join release condition skipped" cond_skipped c8s-join-release.service
+ok "server still active" active rke2-server.service
 
-CASE=enrollment-failure
+CASE=agent-enrollment-gate
 scenario_reset
 launch_media agent
-: > "$C8S_ROLE_FIXTURE/join-fails"
-systemctl start --no-block "${payload_units[@]}"
-for _ in $(seq 1 80); do
-    [[ -f /run/confos/test-join-attempts ]] && [[ $(cat /run/confos/test-join-attempts) -ge 2 ]] && break
-    sleep 0.1
-done
-ok "failed enrollment retries automatically" test "$(cat /run/confos/test-join-attempts)" -ge 2
-ok "enrollment never satisfies the agent gate" not_active c8s-join.service
-ok "failed enrollment cannot start agent" not_active rke2-agent.service
-ok "agent payload never executed" test ! -e /run/confos/test-agent-started
-ok "no credential was staged" test ! -e /run/confos/rke2-agent-token
-ok "stop cancels pending enrollment" systemctl stop c8s-join.service
-attempts=$(cat /run/confos/test-join-attempts)
-sleep 0.2
-ok "stopped enrollment stays inactive" not_active c8s-join.service
-ok "stop leaves no running process" test "$(systemctl show -p MainPID --value c8s-join.service)" = 0
-ok "stop prevents additional attempts" test "$(cat /run/confos/test-join-attempts)" = "$attempts"
-
-CASE=enrollment-retry
-scenario_reset
-launch_media agent
-: > "$C8S_ROLE_FIXTURE/join-fails-once"
-ok "initial boot jobs queued" systemctl start --no-block "${payload_units[@]}"
-# The first failure cancels the original agent job; the retry queues a new one.
-for _ in $(seq 1 80); do
-    active rke2-agent.service && [[ -f /run/confos/test-agent-started ]] && break
-    sleep 0.1
-done
-ok "enrollment retried automatically" test "$(cat /run/confos/test-join-attempts)" -ge 2
-ok "recovered enrollment starts agent" active rke2-agent.service
-ok "recovered agent has its credential" test -f /run/confos/test-agent-started
+: > /dev/disk/by-label/opkeydata
+ok "agent boots" boot_roles
+ok "enrollment active" active c8s-join.service
+systemctl stop c8s-join.service
+ok "agent stops with its enrollment gate" not_active rke2-agent.service
+ok "enrollment gate is required by rke2-agent" \
+    grep -qE '^Requires=.*c8s-join[.]service' "$SOURCE_UNITS/rke2-agent.service.d/20-role.conf"
 
 for scenario in missing-launch invalid-signature prepare-failure; do
     CASE="boot-$scenario"

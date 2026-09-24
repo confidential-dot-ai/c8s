@@ -1,10 +1,10 @@
-{{- if and .Values.ratlsMesh.enabled (not .Values.node.bakedServices) }}
+{{- if .Values.ratlsMesh.enabled }}
 {{- $attestationApiURL := include "c8s.attestationApiURL" . -}}
 {{/*
   cds mode points a single --cds-url at the unified CDS, which serves both
   /attest and /ca.
 */}}
-{{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
+{{- $cdsURL := include "c8s.cdsURL" . -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
 {{- /*
 The release namespace is deliberately NOT excluded: router's egress to
@@ -15,11 +15,12 @@ ipset, so it is unaffected either way.
 */}}
 {{- $excludeSourceNamespaces := .Values.ratlsMesh.iptablesSync.excludeSourceNamespaces | uniq | join "," -}}
 {{- /*
-The iptables-cleanup preStop sleep fires last in the native-sidecar
-reverse-init order; its budget is what terminationGracePeriod leaves after
-the main proxy drain. A higher value gets SIGKILL'd mid-cleanup, leaking
-iptables chains and ipsets across pod restarts. Fail at template time so
-the misconfig is caught before the rollout starts.
+The iptables-cleanup sidecar cleans up on SIGTERM and then lingers for
+preStopSleepSeconds; it stops last in the native-sidecar reverse-init order,
+so its budget is what terminationGracePeriod leaves after the main proxy
+drain. A higher value gets SIGKILL'd mid-cleanup, leaking iptables chains and
+ipsets across pod restarts. Fail at template time so the misconfig is caught
+before the rollout starts.
 */ -}}
 {{- $tgp := include "ratls-mesh.durationSeconds" .Values.ratlsMesh.terminationGracePeriod | int -}}
 {{- $drain := include "ratls-mesh.durationSeconds" .Values.ratlsMesh.drainTimeout | int -}}
@@ -75,7 +76,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        {{- if .Values.attestationApi.enabled }}
+        {{- if include "c8s.attestationApiSocketPresent" . }}
         # workloadclaims.InventorySocketGID: the attest-proxy's socket is
         # group-owned by it; the mesh runs as uid 1337 and needs the group to
         # connect.
@@ -88,6 +89,7 @@ spec:
         - operator: "Exists"
           effect: "NoSchedule"
       volumes:
+        {{- include "c8s.nodeConfigVolume" . | nindent 8 }}
         {{- if .Values.ratlsMesh.measurementsConfig }}
         - name: measurements-config
           configMap:
@@ -108,6 +110,7 @@ spec:
         - name: iptables-cleanup
           restartPolicy: Always
           image: {{ include "ratls-mesh.image" . }}
+          imagePullPolicy: {{ .Values.ratlsMesh.image.pullPolicy }}
           securityContext:
             runAsNonRoot: false
             readOnlyRootFilesystem: true
@@ -127,27 +130,29 @@ spec:
           volumeMounts:
             - name: xtables-lock
               mountPath: /run/xtables.lock
+          # SIGTERM handling, not a preStop exec hook: a locked node image
+          # denies every runc exec, and a lifecycle exec hook is one of the
+          # paths that denial closes (c8s internal/cmds/c8srunc). Native
+          # sidecars stop in reverse init order, so this container's SIGTERM
+          # still arrives after the proxy has drained — the ordering the hook
+          # relied on.
+          #
+          # --keep-guard keeps the guard live: unmeshed inbound and non-TCP
+          # egress are still dropped; TCP to non-pod destinations was never
+          # meshed. --settle-delay is the old post-cleanup sleep.
           command:
-            - /bin/sh
-            - -c
-            - "trap 'exit 0' TERM; while true; do sleep 3600 & wait $!; done"
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - |
-                    # --keep-guard keeps the guard live: unmeshed inbound and
-                    # non-TCP egress are still dropped; TCP to non-pod destinations
-                    # was never meshed.
-                    /app/c8s ratls-mesh iptables-cleanup --keep-guard
-                    sleep {{ .Values.ratlsMesh.iptablesCleanup.preStopSleepSeconds }}
+            - /app/c8s
+            - ratls-mesh
+            - iptables-cleanup
+            - --keep-guard
+            - --on-shutdown
+            - --settle-delay={{ .Values.ratlsMesh.iptablesCleanup.preStopSleepSeconds }}s
           resources:
             {{- toYaml .Values.ratlsMesh.iptablesCleanup.resources | nindent 12 }}
         - name: iptables-sync
           restartPolicy: Always
           image: {{ include "ratls-mesh.image" . }}
+          imagePullPolicy: {{ .Values.ratlsMesh.image.pullPolicy }}
           securityContext:
             runAsNonRoot: false
             readOnlyRootFilesystem: true
@@ -201,6 +206,8 @@ spec:
             - --cw-inbound-passthrough={{ join "," $entries }}
             - --ready-file
             - /tmp/ratls-iptables-ready
+            - --ready-addr
+            - 127.0.0.1:{{ .Values.ratlsMesh.ports.iptablesReady }}
             - --iptables-metrics-file
             - /tmp/ratls-iptables-metrics.json
             - --log-level
@@ -210,12 +217,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+          # The mesh proxy must not start before interception exists, and a
+          # native sidecar's startup probe is what holds it. HTTP, not exec:
+          # a locked node image denies every runc exec. hostNetwork, so the
+          # endpoint and the probe meet on the node's loopback.
           startupProbe:
-            exec:
-              command:
-                - test
-                - -f
-                - /tmp/ratls-iptables-ready
+            httpGet:
+              host: 127.0.0.1
+              path: /readyz
+              port: {{ .Values.ratlsMesh.ports.iptablesReady }}
             periodSeconds: 1
             failureThreshold: 60
           resources:
@@ -240,6 +250,7 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- include "c8s.nodeConfigMount" . | nindent 12 }}
             {{- if .Values.ratlsMesh.measurementsConfig }}
             - name: measurements-config
               mountPath: /etc/c8s-measurements
@@ -270,8 +281,10 @@ spec:
             - --rotation-timeout
             - {{ .Values.ratlsMesh.rotationTimeout | quote }}
             {{- end }}
-            {{- if .Values.ratlsMesh.measurementsConfig }}
-            - --measurements-config
+            {{- if .Values.node.baked }}
+            - --image-policy-file=/run/c8s-node/peers.json
+            {{- else if .Values.ratlsMesh.measurementsConfig }}
+            - --image-policy-file
             - /etc/c8s-measurements/ratls-mesh.json
             {{- else }}
             {{- if .Values.ratlsMesh.measurements }}
@@ -308,7 +321,9 @@ spec:
             - {{ printf "ratls-mesh.%s.svc" .Release.Namespace | quote }}
             - --ca-poll-interval
             - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
-            {{- if not .Values.ratlsMesh.measurementsConfig }}
+            {{- if .Values.node.baked }}
+            - --cds-image-policy-file=/run/c8s-node/cds.json
+            {{- else if not .Values.ratlsMesh.measurementsConfig }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements
             - {{ join "," . | quote }}

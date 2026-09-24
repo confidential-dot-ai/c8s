@@ -18,7 +18,7 @@ import (
 
 func parseExcludeUIDs(excludeUIDsStr string) ([]uint32, error) {
 	var excludeUIDs []uint32
-	for _, s := range strings.Split(excludeUIDsStr, ",") {
+	for s := range strings.SplitSeq(excludeUIDsStr, ",") {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
@@ -195,8 +195,8 @@ func ensureIptablesJumpsForBinary(logger *slog.Logger, ipt *iptables.IPTables, j
 		}
 		// Reverse order: each insert lands at position 1, so the block's
 		// first jump is the last one inserted.
-		for i := len(block.jumps) - 1; i >= 0; i-- {
-			jump := block.jumps[i]
+		for _, jump := range slices.Backward(block.jumps) {
+
 			deleteAllIptablesRules(logger, ipt, jump)
 			if addErr := ipt.Insert(jump.table, jump.chain, 1, jump.args...); addErr != nil {
 				return fmt.Errorf("install %s jump rule on %s: %w", jump.label, bin, addErr)
@@ -233,7 +233,7 @@ func isJumpBlockAtHead(ipt *iptables.IPTables, block jumpBlock) (atHead bool, mi
 func parseJumpBlockAtHead(out string, block jumpBlock) (atHead bool, misplaced int) {
 	prefix := "-A " + block.chain + " "
 	var installed []string
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, prefix) {
 			continue

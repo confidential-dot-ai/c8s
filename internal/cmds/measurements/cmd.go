@@ -5,8 +5,9 @@ package measurements
 import (
 	"fmt"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/spf13/cobra"
+
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 // NewCmd returns the `c8s measurements` command group.
@@ -34,7 +35,7 @@ func newLintCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "ok: %s, %d image(s)\n", set.Family, len(set.Images))
 			for _, img := range set.Images {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", img.Name, len(img.RTMRs))
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", img.Name, len(img.Registers))
 			}
 			return nil
 		},

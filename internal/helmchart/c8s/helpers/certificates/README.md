@@ -19,6 +19,7 @@ The helper takes a dict with these fields:
 | --- | --- |
 | `root` | Chart root for image and endpoint helpers |
 | `san` | Certificate workload identity or Service DNS name |
+| `sanFile` | Optional verified SAN file; replaces `san` for baked node images |
 | `certOut`, `keyOut` | Certificate and private-key output paths |
 | `caOut` | Optional output path for the mesh CA bundle trailing the leaf |
 | `volume`, `mountPath` | Writable certificate volume and its mount directory |

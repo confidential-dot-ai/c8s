@@ -29,14 +29,15 @@
 #     -exclude-ref busybox
 # -exclude-ref omits busybox from the node's baked base;
 # the chart supplies its argv-pinned entry through the served allowlist.
-# After a bump, re-verify on first boot that the rendered containerd
-# config.toml has exactly ONE `imports` line — see the baked
-# config-v3.toml.tmpl in this profile's mkosi.extra for why.
+# rke2's own containerd base template imports config-v3.toml.d/*.toml since
+# v1.36 (k3s b51167a9), which is where the NRI drop-in lives, so this profile
+# bakes no config-v3.toml.tmpl: one that added the import produced a duplicate
+# `imports` key that containerd refuses, and rke2-server never came up.
 #
-# The multi-command c8s binary and operator/get-cert image resolve from one
-# C8S_REF. The binary contains the chart, so Kubernetes integration, nginx
-# configuration and the CDS seed are rendered from exactly that source at
-# build time. The guest needs no c8s Helm install or chart source download.
+# The multi-command c8s binary and c8s container images resolve from one
+# C8S_REF. The binary contains the complete core chart, rendered at build
+# time. Its pinned images are also baked as OCI archives, so guest startup
+# needs neither Helm nor a registry connection.
 #
 # Downloads are cached under mkosi.pkgcache/c8s/ — that dir survives across
 # builds; mkosi.local does NOT (the confos Rust driver wipes it on build
@@ -55,11 +56,16 @@ HELM_VERSION="v3.14.4"
 HELM_LINUX_AMD64_SHA256="a5844ef2c38ef6ddf3b5a8f7d91e7e0e8ebc39a38bb3fc8013d629c1ef29c259"
 
 RKE2_VERSION="v1.36.4+rke2r1"
+# Where rke2 extracts the runtime image's bin dir to (a symlink to
+# data/<digest>/bin, created on first start). The measured wrapper execs runc
+# there by absolute path, and the dev drop-in below points containerd straight
+# at it.
+REAL_RUNC="/var/lib/rancher/rke2/bin/runc"
 RKE2_TARBALL_SHA256="7bcbd3167d6947e1d79cdf722acdc740b28021fefb50dd5b974a1980776d4079"
 RKE2_IMAGES_CORE_SHA256="8988a2eff587dd88b8eab86fe719703e9541a1f08d22771a94cbec446a13db86"
 RKE2_IMAGES_CILIUM_SHA256="6c76903f258b12bc0f322bcb029247ee49544b925170d320409401beeecd41bd"
 
-# The baked binary and Kubernetes operator/get-cert image resolve from a
+# The baked binary and Kubernetes c8s images resolve from a
 # single published ref. The image must include `c8s node-image render`.
 # Inputs arrive through confos's explicit sync-input files; sudo strips the
 # caller's environment. c8s-registry supports private/air-gapped registries.
@@ -68,6 +74,8 @@ C8S_REGISTRY=$(cat "$SYNC_INPUTS/c8s-registry" 2>/dev/null || true)
 C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 OPERATOR_REPO="${C8S_REGISTRY}/c8s-operator"
+CDS_REPO="${C8S_REGISTRY}/cds"
+MESH_REPO="${C8S_REGISTRY}/ratls-mesh"
 # The image's TEE platform, from build's --sync-input. Required: the NRI
 # base allowlist types the RA-TLS identity CDS checks against attestation
 # evidence,
@@ -104,13 +112,41 @@ printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
 printf '# Self-label so c8s install --hardware-platform %s finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
-# C8S_DEV=1 builds turn the kubelet debugging handlers back on so `kubectl
-# exec`/`attach`/`logs` work. The base config.yaml pins them off; rke2 passes
-# both flags and the kubelet takes the last one. Rendered only for dev so the
-# locked image has no such drop-in at all.
-if [ "$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)" = 1 ]; then
-    printf '# DEV build: kubectl exec/attach/logs allowed. Never ship.\nkubelet-arg+:\n  - enable-debugging-handlers=true\n' \
-        > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/60-dev-debugging-handlers.yaml"
+# Reference copies of the guard AddOns on the read-only root. RKE2 must be
+# able to write server/manifests (it stages its bundled charts there), so
+# that directory lives on the writable overlay and a root process could
+# shadow a guard. psa-ready.sh waits for every guard staged here and compares
+# the live objects against the copy before cred-release serves; a drifted
+# guard keeps :8443 closed. GUARDS is the single statement of what is a
+# guard (node-guest-image-invariants.sh reads it); the profile tree is the
+# single source of each: this copies, never edits.
+#
+# C8S_DEV=1 builds skip the baked pod-exec-policy AddOn so `kubectl exec`/
+# `attach`/`port-forward` work for debugging: RKE2 ignores a server/manifests
+# AddOn whose name has a `.skip` sibling, and leaving its reference copy out
+# keeps psa-ready.sh from waiting for objects that never appear. The locked
+# image keeps the policy (the kubelet debugging handlers are on in both
+# builds, for `kubectl logs`) and has no such marker at all.
+GUARDS="psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac"
+GUARDS_SRC="$SRCDIR/mkosi.profiles/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+GUARDS_DST="$STAGE_DIR/usr/lib/confai/guards"
+DEV=$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)
+for guard in $GUARDS; do
+    [ -f "$GUARDS_SRC/$guard.yaml" ] || { echo "c8s sync: FATAL guard AddOn $GUARDS_SRC/$guard.yaml missing" >&2; exit 1; }
+    if [ "$DEV" = 1 ] && [ "$guard" = pod-exec-policy ]; then
+        mkdir -p "$STAGE_DIR/var/lib/rancher/rke2/server/manifests"
+        printf '# DEV build: pod-exec-policy AddOn skipped. Never ship.\n' \
+            > "$STAGE_DIR/var/lib/rancher/rke2/server/manifests/$guard.yaml.skip"
+        continue
+    fi
+    install -D -m 0444 "$GUARDS_SRC/$guard.yaml" "$GUARDS_DST/$guard.yaml"
+done
+
+if [ "$DEV" = 1 ]; then
+    mkdir -p "$STAGE_DIR/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d"
+    printf '# DEV build: unwrapped runtime, runc exec allowed. Never ship.\n[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]\n  BinaryName = "%s"\n' \
+        "$REAL_RUNC" \
+        > "$STAGE_DIR/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/60-dev-runc.toml"
 fi
 
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
@@ -120,8 +156,8 @@ C8S_REF="${C8S_REF:-v0.1.0-rc2}"
 # c8s-binary=1: the build script pre-staged the multi-command binary at
 # usr/local/bin/c8s in mkosi.local (built from a source checkout). The image
 # repro gate uses this so a PR that changes the baked binary or its commands
-# is gated on its own code; the operator/get-cert pod image and the NRI base allowlist
-# still resolve from C8S_REF. Published builds never set it.
+# is gated on its own host code and chart; core container images still resolve
+# from C8S_REF, which must provide the chart's commands. Published builds never set it.
 C8S_PRESTAGED=$(cat "$SYNC_INPUTS/c8s-binary" 2>/dev/null || true)
 C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
 if [ "$C8S_PRESTAGED" = 1 ] && [ ! -f "$C8S_TARGET" ]; then
@@ -129,12 +165,12 @@ if [ "$C8S_PRESTAGED" = 1 ] && [ ! -f "$C8S_TARGET" ]; then
     exit 1
 fi
 if [ "$C8S_PRESTAGED" = 1 ]; then
-    echo "c8s sync: using the pre-staged c8s binary; resolving operator at c8s ref ${C8S_REF}"
+    echo "c8s sync: using the pre-staged c8s binary; resolving core images at c8s ref ${C8S_REF}"
 else
-    echo "c8s sync: resolving c8s binary + operator at c8s ref ${C8S_REF}"
+    echo "c8s sync: resolving c8s binary + core images at c8s ref ${C8S_REF}"
 fi
-# Resolve the independent OCI digests together. CDS, mesh and NRI all use
-# the same extracted c8s binary; only the operator still runs in a pod.
+# Resolve each c8s image from the same source ref. The nginx digest remains
+# pinned by the embedded chart rather than duplicated in this script.
 DIGEST_TMPDIR=$(mktemp -d)
 trap 'rm -rf "$DIGEST_TMPDIR"' EXIT
 resolve_digest_bg() {  # <repo> <ref> <out-file> -> writes sha256:... or FATALs
@@ -154,6 +190,10 @@ else
 fi
 resolve_digest_bg "$OPERATOR_REPO" "$C8S_REF" "$DIGEST_TMPDIR/operator" &
 operator_pid=$!
+resolve_digest_bg "$CDS_REPO" "$C8S_REF" "$DIGEST_TMPDIR/cds" &
+cds_pid=$!
+resolve_digest_bg "$MESH_REPO" "$C8S_REF" "$DIGEST_TMPDIR/mesh" &
+mesh_pid=$!
 # Wait on every job regardless of individual exit status (a bare `wait $pid`
 # chain under set -e would abort on the first failure and leave the rest
 # running as orphans) — resolve_digest_bg already printed a FATAL for
@@ -161,6 +201,8 @@ operator_pid=$!
 # shape and is what actually fails the build closed.
 [ -z "$nri_pid" ] || wait "$nri_pid" || true
 wait "$operator_pid" || true
+wait "$cds_pid" || true
+wait "$mesh_pid" || true
 
 read_digest() {  # <name> <out-file> -> prints sha256:... or FATALs on a bad/missing result
     local d
@@ -172,27 +214,23 @@ read_digest() {  # <name> <out-file> -> prints sha256:... or FATALs on a bad/mis
 }
 NRI_DIGEST=$(read_digest nri "$DIGEST_TMPDIR/nri")
 OPERATOR_DIGEST=$(read_digest operator "$DIGEST_TMPDIR/operator")
+CDS_DIGEST=$(read_digest cds "$DIGEST_TMPDIR/cds")
+MESH_DIGEST=$(read_digest mesh "$DIGEST_TMPDIR/mesh")
 rm -rf "$DIGEST_TMPDIR"
 trap - EXIT
 NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
 echo "c8s sync: ref ${C8S_REF} -> binary ${NRI_DIGEST}, operator ${OPERATOR_DIGEST}"
 
-# Render the NRI base allowlist template into the stage tree, substituting the resolved
-# operator/get-cert digest into allowlist.base. The template lives outside mkosi.extra
-# (image-policy.yaml.in) so mkosi never copies the raw template; this rendered
-# copy is the immutable /usr/lib/c8s/image-policy.yaml boot staging copies, with no
-# extra-tree precedence ambiguity. The operator digest tracks C8S_REF.
+# Render the system floor. Boot preparation merges the chart's measured
+# component seed into this base before RKE2/containerd starts, so CDS and
+# its clients can start before the live allowlist becomes available.
 render_nri_base() {
     local tmpl="$SRCDIR/mkosi.profiles/c8s/image-policy.yaml.in"
     local dst="$STAGE_DIR/usr/lib/c8s/image-policy.yaml"
     [ -f "$tmpl" ] || { echo "c8s sync: FATAL base-allowlist template $tmpl missing" >&2; exit 1; }
     mkdir -p "$(dirname "$dst")"
-    sed \
-        -e "s|@OPERATOR_DIGEST@|${OPERATOR_DIGEST}|g" \
-        -e "s|@OPERATOR_IMAGE@|${OPERATOR_REPO}@${OPERATOR_DIGEST}|g" \
-        -e "s|@PLATFORM@|${PLATFORM}|g" \
-        "$tmpl" > "$dst"
-    echo "c8s sync: NRI base allowlist rendered (operator ${OPERATOR_DIGEST})"
+    sed -e "s|@PLATFORM@|${PLATFORM}|g" "$tmpl" > "$dst"
+    echo "c8s sync: NRI system base allowlist rendered"
 }
 
 # Render from the chart embedded in the exact binary staged into the image.
@@ -217,16 +255,22 @@ render_node_integration() {
         --kube-version "${RKE2_VERSION%%+*}" \
         --image-repository "$OPERATOR_REPO" \
         --image-digest "$OPERATOR_DIGEST" \
+        --cds-image-repository "$CDS_REPO" \
+        --cds-image-digest "$CDS_DIGEST" \
+        --ratls-mesh-image-repository "$MESH_REPO" \
+        --ratls-mesh-image-digest "$MESH_DIGEST" \
         --output-dir "$out"; then
         echo "c8s sync: FATAL ${C8S_REF} must provide a working 'c8s node-image render'; publish this branch's images and select that C8S_REF" >&2
         exit 1
     fi
+    # Both roles share this image. Only rke2-server applies server/manifests,
+    # after authenticated launch staging selects the server role.
     install -D -m 0644 "$out/c8s-integration.yaml" \
         "$STAGE_DIR/var/lib/rancher/rke2/server/manifests/c8s-integration.yaml"
-    install -D -m 0644 "$out/nginx.conf.in" \
-        "$STAGE_DIR/usr/lib/c8s/nginx.conf.in"
     install -D -m 0644 "$out/allowlist-seed.json" \
         "$STAGE_DIR/usr/lib/c8s/allowlist-seed.json"
+    bash "$SRCDIR/mkosi.profiles/c8s/airgap-images.sh" \
+        "$out/images.txt" "$CACHE_DIR/core-images" "$AIRGAP_DIR"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
@@ -312,6 +356,7 @@ PLUGIN_TARGET="$STAGE_DIR/opt/nri/plugins/10-nri-image-policy"
 # Content-addressed by the image digest: a cached copy skips the GHCR pull
 # entirely (oras digest-verifies the blobs on the pull that populates it).
 PLUGIN_CACHE="$CACHE_DIR/nri-image-policy-${NRI_IMAGE##*@sha256:}"
+RUNC_WRAPPER_TARGET="$STAGE_DIR/usr/local/bin/c8s-runc"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -389,8 +434,9 @@ else
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
 fi
+install -D -m 0755 "$C8S_TARGET" "$RUNC_WRAPPER_TARGET"
 
 render_nri_base
 render_node_integration
 
-echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + baked c8s services + Kubernetes integration"
+echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + measured c8s Kubernetes workloads"

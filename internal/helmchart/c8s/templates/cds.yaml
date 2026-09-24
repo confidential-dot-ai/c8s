@@ -19,7 +19,6 @@ metadata:
 data:
   allowlist-seed.json: {{ include "c8s.allowlistSeedJSON" . | trim | quote }}
 ---
-{{- if not .Values.node.bakedServices }}
 {{- if .Values.cds.operatorKeys }}
 {{- if not (contains "BEGIN PUBLIC KEY" .Values.cds.operatorKeys) }}
 {{- fail "cds.operatorKeys must be the PEM content of the operator public-key bundle, not a file path — use `c8s install --operator-keys <file>`, `c8s render-values --operator-keys <file>`, or helm --set-file cds.operatorKeys=<file>" }}
@@ -103,9 +102,20 @@ spec:
              and (with persistence) an RWO volume, so pin it to a known node.
              The CDS digest is always in the NRI floor (c8s.imageAllowlist),
              so image policy admits CDS on whichever node it lands. */}}
+      {{- /* Baked nodes render this chart at build time, before any node
+             exists, so there is no per-cluster selector to set. RKE2 gives
+             node-role.kubernetes.io/control-plane to servers only, never to
+             agents, so this pins CDS to the server. It assumes the single
+             server a baked image boots; promoting a second one would let
+             the singleton move between them. */}}
+      {{- if .Values.node.baked }}
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      {{- else }}
       {{- with .Values.cds.node.selector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.cds.node.tolerations }}
       tolerations:
@@ -126,7 +136,13 @@ spec:
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
             - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
+            {{- if .Values.node.baked }}
+            - --allowlist-seed=/run/c8s-node/allowlist-seed.json
+            - --operator-keys=/run/c8s-node/operator-pubkey
+            - --dns-san-file=/run/c8s-node/tls-san
+            {{- else }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
+            {{- end }}
             - --jwt-clock-skew={{ .Values.cds.jwtClockSkew }}
             - --ca-common-name={{ .Values.cds.ca.commonName }}
             - --ca-cert-validity={{ .Values.cds.ca.certValidity }}
@@ -150,8 +166,10 @@ spec:
             {{- if .Values.cds.cnPattern }}
             - --allowed-cn-pattern={{ .Values.cds.cnPattern }}
             {{- end }}
-            {{- if .Values.cds.measurementsConfig }}
-            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- if .Values.node.baked }}
+            - --image-policy-file=/run/c8s-node/peers.json
+            {{- else if .Values.cds.measurementsConfig }}
+            - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
@@ -163,7 +181,7 @@ spec:
             {{- with .Values.cds.sandboxInventoryCIDRs }}
             - --sandbox-inventory-cidr={{ join "," . }}
             {{- end }}
-            {{- if .Values.cds.operatorKeys }}
+            {{- if and (not .Values.node.baked) .Values.cds.operatorKeys }}
             - --operator-keys=/etc/cds-operator-keys/keys.pem
             {{- end }}
             - --rate-limit={{ .Values.cds.rateLimit }}
@@ -202,6 +220,8 @@ spec:
             - name: data
               mountPath: /data
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- include "c8s.nodeConfigMount" . | nindent 12 }}
+            {{- if not .Values.node.baked }}
             - name: allowlist-seed
               mountPath: /etc/cds
               readOnly: true
@@ -214,6 +234,7 @@ spec:
             - name: measurements-config
               mountPath: /etc/c8s-measurements
               readOnly: true
+            {{- end }}
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -234,6 +255,8 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
+        {{- include "c8s.nodeConfigVolume" . | nindent 8 }}
+        {{- if not .Values.node.baked }}
         - name: allowlist-seed
           configMap:
             name: {{ include "c8s.cdsName" . }}-allowlist-seed
@@ -246,6 +269,7 @@ spec:
         - name: measurements-config
           configMap:
             name: {{ include "c8s.fullname" . }}-measurements
+        {{- end }}
         {{- end }}
 ---
 apiVersion: v1
@@ -271,4 +295,3 @@ spec:
       {{- if and (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
       nodePort: {{ .Values.cds.service.nodePort }}
       {{- end }}
-{{- end }}

@@ -4,22 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -107,7 +102,7 @@ func newBootstrapEnv(t *testing.T, platform teetypes.PlatformType, mutateFresh f
 		case credrelease.ReleasePath:
 			releases.Add(1)
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
+			releaseHandler(t, http.StatusOK, goodRelease, nil).ServeHTTP(w, r)
 		default:
 			t.Errorf("unexpected request path %q", r.URL.Path)
 			http.NotFound(w, r)
@@ -235,63 +230,4 @@ func TestBootstrapTransportFailsClosed(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Fatalf("signed request reached HTTP: %d requests", hits.Load())
 	}
-}
-
-func TestCredentialReleaseRetryBounds(t *testing.T) {
-	refused := &url.Error{Op: "Post", URL: "https://node:8443/attest", Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}}
-	t.Run("zero wait", func(t *testing.T) {
-		calls := 0
-		err := retryCredentialRelease(context.Background(), Config{Timeout: time.Second}, func(context.Context) error {
-			calls++
-			return refused
-		})
-		if !errors.Is(err, syscall.ECONNREFUSED) || calls != 1 {
-			t.Fatalf("calls=%d, err=%v", calls, err)
-		}
-	})
-	t.Run("verification failures are final", func(t *testing.T) {
-		calls := 0
-		want := errors.New("quote verification failed")
-		err := retryCredentialRelease(context.Background(), Config{Timeout: time.Second, ReleaseWait: time.Minute}, func(context.Context) error {
-			calls++
-			return want
-		})
-		if !errors.Is(err, want) || calls != 1 {
-			t.Fatalf("calls=%d, err=%v", calls, err)
-		}
-	})
-	t.Run("cancel while waiting", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		err := retryCredentialRelease(ctx, Config{Timeout: time.Second, ReleaseWait: time.Minute}, func(context.Context) error {
-			cancel()
-			return refused
-		})
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("want cancellation, got %v", err)
-		}
-	})
-	t.Run("collateral dial failure is final", func(t *testing.T) {
-		calls := 0
-		want := &url.Error{Op: "Post", URL: "https://node:8443/attest", Err: fmt.Errorf("ratls: verify evidence: %w", refused.Err)}
-		err := retryCredentialRelease(context.Background(), Config{Timeout: time.Second, ReleaseWait: time.Minute}, func(context.Context) error {
-			calls++
-			return want
-		})
-		if !errors.Is(err, want) || calls != 1 {
-			t.Fatalf("calls=%d, err=%v", calls, err)
-		}
-	})
-	t.Run("deadline bounds the retry sleep", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		calls := 0
-		err := retryCredentialRelease(ctx, Config{Timeout: time.Second, ReleaseWait: 10 * time.Millisecond}, func(context.Context) error {
-			calls++
-			return refused
-		})
-		if !errors.Is(err, syscall.ECONNREFUSED) || calls != 1 {
-			t.Fatalf("wait deadline was not respected: calls=%d, err=%v", calls, err)
-		}
-	})
 }

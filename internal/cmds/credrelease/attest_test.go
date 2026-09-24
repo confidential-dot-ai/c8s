@@ -16,14 +16,19 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/remote"
-
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
+
+type evidenceGeneratorFunc func(context.Context, []byte) (teetypes.AttestationEvidence, error)
+
+func (f evidenceGeneratorFunc) GenerateEvidence(ctx context.Context, nonce []byte) (teetypes.AttestationEvidence, error) {
+	return f(ctx, nonce)
+}
 
 func newAttestHandler(t *testing.T) (*Handler, *operatorauth.Signer) {
 	t.Helper()
 	signer, pub := newOperatorAuth(t)
-	handler, err := NewHandler(pub, nil, defaultCertOrg, defaultCertCN, time.Hour)
+	handler, err := NewHandler(pub, nil, defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +84,10 @@ func TestAttestRefusesInvalidRequests(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			h.generateEvidence = func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
+			h.attester = evidenceGeneratorFunc(func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
 				called = true
 				return teetypes.AttestationEvidence{}, nil
-			}
+			})
 			method, path := tc.method, tc.path
 			if method == "" {
 				method = http.MethodPost
@@ -122,7 +127,7 @@ func TestAttestPreservesNonceAndEvidence(t *testing.T) {
 				Platform: platform,
 				Evidence: json.RawMessage(`{"quote":"bm9uY2UtYm91bmQ="}`),
 			}
-			h.generateEvidence = func(ctx context.Context, nonce []byte) (teetypes.AttestationEvidence, error) {
+			h.attester = evidenceGeneratorFunc(func(ctx context.Context, nonce []byte) (teetypes.AttestationEvidence, error) {
 				if !bytes.Equal(nonce, bytes.Repeat([]byte{0x7a}, 32)) {
 					t.Errorf("attester nonce = %x", nonce)
 				}
@@ -131,7 +136,7 @@ func TestAttestPreservesNonceAndEvidence(t *testing.T) {
 					t.Error("attester context has no bounded timeout")
 				}
 				return want, nil
-			}
+			})
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, signedAttestRequest(t, context.Background(), AttestPath, attestBody(t, 32), signer))
 			if rec.Code != http.StatusOK {
@@ -162,21 +167,21 @@ func TestAttestUpstreamFailureAndCancellation(t *testing.T) {
 			case "unconfigured":
 				wantStatus = http.StatusServiceUnavailable
 			case "failure":
-				h.generateEvidence = func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
+				h.attester = evidenceGeneratorFunc(func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
 					return teetypes.AttestationEvidence{}, errors.New("private upstream failure detail")
-				}
+				})
 			case "canceled":
 				cancel()
-				h.generateEvidence = func(ctx context.Context, _ []byte) (teetypes.AttestationEvidence, error) {
+				h.attester = evidenceGeneratorFunc(func(ctx context.Context, _ []byte) (teetypes.AttestationEvidence, error) {
 					if !errors.Is(ctx.Err(), context.Canceled) {
 						t.Errorf("upstream context = %v, want canceled", ctx.Err())
 					}
 					return teetypes.AttestationEvidence{}, ctx.Err()
-				}
+				})
 			case "invalid evidence":
-				h.generateEvidence = func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
+				h.attester = evidenceGeneratorFunc(func(context.Context, []byte) (teetypes.AttestationEvidence, error) {
 					return teetypes.AttestationEvidence{Evidence: json.RawMessage("{")}, nil
-				}
+				})
 			}
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, signedAttestRequest(t, ctx, AttestPath, attestBody(t, 32), signer))
@@ -213,6 +218,7 @@ func TestRunServesAuthenticatedBootstrap(t *testing.T) {
 				ListenAddr: addr, AttestationAPIURL: stub.URL(), Platform: string(platform),
 				ClientCACert: clientCert, ClientCAKey: clientKey, ServerCACert: serverCert,
 				CertTTL: defaultCertTTL, CertOrg: defaultCertOrg, CertCN: defaultCertCN,
+				LogCertTTL: defaultLogCertTTL, LogCertOrg: defaultLogCertOrg, LogCertCN: defaultLogCertCN,
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)

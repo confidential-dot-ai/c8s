@@ -40,7 +40,7 @@ func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, server
 	if err != nil {
 		return peerPolicy{}, err
 	}
-	if refs.Family != family || refs.Empty() {
+	if refs.Family != family || len(refs.Images) == 0 {
 		return peerPolicy{}, fmt.Errorf("join: policy must contain authorized %s identities", family)
 	}
 	if server && len(refs.Images) != 1 {
@@ -48,9 +48,9 @@ func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, server
 	}
 	for _, entry := range refs.Images {
 		if len(entry.Anchor) == 0 {
-			return peerPolicy{}, fmt.Errorf("join: policy entry %q requires operator_key", entry.Name)
+			return peerPolicy{}, fmt.Errorf("join: policy entry %q requires approver_key", entry.Name)
 		}
-		if family == ratls.TEETypeTDX && (len(entry.RTMRs[1]) != refvalues.DigestSize || len(entry.RTMRs[2]) != refvalues.DigestSize) {
+		if family == ratls.TEETypeTDX && (len(entry.Registers[1]) != refvalues.DigestSize || len(entry.Registers[2]) != refvalues.DigestSize) {
 			return peerPolicy{}, fmt.Errorf("join: TDX policy entry %q requires RTMR[1] and RTMR[2]", entry.Name)
 		}
 	}

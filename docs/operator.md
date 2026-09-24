@@ -85,12 +85,22 @@ The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
 `c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
-The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
-RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
-CRDs, webhook and admission policies are rendered from this same chart at
-**image build time**. RKE2 applies those manifests at boot; there is no c8s
-Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
-namespace carries `confidential.ai/baked=true`.
+The [measured node image](../node-guest-image/README.md) runs CDS, the RA-TLS
+mesh, router and operator as Kubernetes workloads rendered from this chart
+at **image build time**. Their pinned container images are baked into the
+image too. RKE2 applies the manifests at boot; no guest Helm installation is
+needed. The local attester, signed-launch verification and NRI enforcement
+remain host services needed before those workloads can start. `c8s install`
+refuses a cluster whose `c8s-system` namespace carries `confidential.ai/baked=true`.
+
+Core Pods mount public signed identity inputs read-only from `/run/c8s-node`;
+they never mount the private launch directory. The measurement covers the
+initial manifests and images, while Kubernetes API changes remain subject to
+the existing trusted-cluster-administrator boundary. Changing core versions
+requires rebuilding and relaunching with updated signed image pins. The
+current schema does not support rolling upgrades across different measured
+images; CDS's ephemeral CA also requires certificate re-bootstrap when it
+restarts.
 
 ### Authenticated launch configuration
 
@@ -117,7 +127,7 @@ Neither credential is present on the host launch disk. Existing v1 bundles
 must remove the `rke2` field, set `schemaVersion: c8s-launch/v2`, and be signed
 again before use with this image.
 
-`c8s launch-config new` creates everything one cluster needs: a server
+`c8s node launch-config new` creates everything one cluster needs: a server
 launch key, an agent launch key, a signed `launch.yaml`
 per node and the client policy that pins the server. Give it the trusted
 `manifest.json` published with the exact node image, the server's guest IPv4
@@ -125,7 +135,7 @@ address that every node can reach, and the agent names. On SNP, also pass
 the VM's vCPU count, which selects the launch digest.
 
 ```sh
-c8s launch-config new --out demo --cluster-id demo \
+c8s node launch-config new --out demo --cluster-id demo \
   --image-manifest manifest.json \
   --server-address 10.0.0.10 \
   --agent demo-agent-1 --agent demo-agent-2
@@ -134,6 +144,9 @@ c8s launch-config new --out demo --cluster-id demo \
 xorriso -as mkisofs -V opkeydata -o demo/server.iso demo/server
 xorriso -as mkisofs -V opkeydata -o demo/demo-agent-1.iso demo/demo-agent-1
 ```
+
+`c8s launch-config` remains available as a compatibility command for existing
+launch scripts; both paths use the same implementation.
 
 The bundle directory is created new and never reused:
 
@@ -146,10 +159,9 @@ The bundle directory is created new and never reused:
 | `demo/<agent>/` | the same three files for each agent |
 
 An agent can be added to a running cluster without touching the server:
-`c8s launch-config add-agent --bundle demo --name demo-agent-3` derives
-its document from the server's (same cluster, image and authorized keys)
-and signs it with the agent key. The agent obtains its credential through
-attested enrollment after launch. A server created
+`c8s node launch-config add-agent --bundle demo --name demo-agent-3` derives
+its document from the server's (same cluster, image and keys) and signs it
+with the agent key. A server created
 without `--server-address` autodetects its own; `add-agent` then needs
 `--server-address`.
 
@@ -204,44 +216,53 @@ signed bundle and the corresponding role's hardware-bound public key.
 The verified files live in root-only `/run/confos/launch`. `peers.json`
 contains the software/key tuples for this cluster's server and permitted
 agents; `cds.json` contains only its server. On a server with authorized
-agents, `agents.json` contains only those agent identities. Their
-shared measurement-file
-schema carries `operator_key` as the exact PEM string alongside each entry's
+agents, `agents.json` contains only those agent identities. Their shared
+measurement-file
+schema carries `approver_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
 CDS clients require the authorized server despite identical software images.
-The schema belongs to attestation-go's `refvalues` package: `operator_key`
+The schema belongs to attestation-go's `refvalues` package: `approver_key`
 maps to `remote.ImagePin.Anchor`. `remote.EnforceImages` checks the image and
 calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
 borrow another entry's authorized key. c8s passes these complete pins through
 `remote.Policy.Images`; legacy flags that cannot carry anchors are refused
 where they would weaken enforcement.
-The server publishes only the CDS URL and server policy to the public
-`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
-and private keys do not enter that ConfigMap. The operator forwards the full
-server policy to injected workload helpers. NRI and host CDS clients use the
-same server policy directly from the staged files.
+Boot preparation copies the public identity policies to `/run/c8s-node`;
+core Pods mount that directory read-only without access to the private launch
+directory. The operator forwards the full server policy to injected workload
+helpers, which use the in-cluster CDS Service URL. NRI uses the same server
+policy from private staging and reaches CDS through the signed server
+address and NodePort. Private keys never enter the public policy directory,
+and no RKE2 credential exists on launch media at all.
 
 On servers with an authorized agent policy, `c8s-join-release.service`
 listens on TCP `8444`. An agent's `c8s-join.service` authenticates that server
 with the pinned image and designated server key; the server checks the
-agent's pinned image and an explicitly authorized agent key. Both
-endpoints prove possession of their attested TLS keys. This works with TDX
-and SNP, using the same image and platform tuple throughout each cluster.
-Only the agent credential with its RKE2 CA pin is released, and the agent
-stages it in root-only `/run/confos/rke2-agent-token` before RKE2 may start.
-A server without authorized agents does not start the release listener.
+agent's pinned image and an explicitly authorized agent key. Both endpoints
+prove possession of their attested TLS keys. This works with TDX and SNP,
+using the same image and platform tuple throughout each cluster. Only the
+agent credential with its RKE2 CA pin is released, and the agent stages it
+in root-only `/run/confos/rke2-agent-token` before RKE2 may start. A server
+without authorized agents does not start the release listener.
+
+The released agent credential remains a secret RKE2 enrollment credential
+once inside the guest. The RA-TLS mesh protects selected pod traffic; it does
+not wrap the RKE2 supervisor on port `9345` or the Kubernetes API on port
+`6443`. RKE2 generates the privileged server token itself, so no server-
+enrollment credential ever leaves the server guest. See
+[RKE2 token management](https://docs.rke2.io/security/token).
 
 Enrollment waits indefinitely while the server is unavailable: the unit
-restarts on failure with a five-second backoff. Until it succeeds,
-RKE2 agent startup remains blocked; enrollment does not depend on CDS, the
-mesh, Kubernetes or kubelet. Nodes in different datacenters need agent-to-
-server TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
-for the mesh and CNI. There is no NAT traversal or control-plane failover.
+restarts on failure with a five-second backoff. Until it succeeds, RKE2
+agent startup remains blocked; enrollment does not depend on CDS, the mesh,
+Kubernetes or kubelet. Nodes in different datacenters need agent-to-server
+TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity for
+the mesh and CNI. There is no NAT traversal or control-plane failover.
 
 The server's generated agent credential survives launch staging and service
 restarts within the same boot. All guest runtime state, including RKE2's
-server credential and CA, resets on a full VM reboot. Relaunch agents
-after a server reboot so they enroll against the new ephemeral cluster.
+server credential and CA, resets on a full VM reboot. Relaunch agents after
+a server reboot so they enroll against the new ephemeral cluster.
 
 ### Chart-managed defaults
 
@@ -458,27 +479,29 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
-For the measured node image, CDS stores its database at
-`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
-restarts, but a VM reboot loses it. The baked component seed and optional
-signed `workloads` document initialize the next boot; reapply any later
-operator changes. The CA signing key is in process memory and changes on a
-CDS process restart, so plan for certificate re-bootstrap. This image does
-not expose a persistent-volume switch in launch configuration.
+For the measured node image, CDS stores its database at `/data/allowlist.db`
+in the Pod's `emptyDir`. A container restart preserves that directory; Pod
+recreation or a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the new store; reapply any later
+operator changes. The CA signing key is in process memory and changes on
+any CDS process restart, so plan for certificate re-bootstrap even when the
+database survives. This image does not expose a persistent-volume switch in
+launch configuration.
 
 For chart-managed CDS:
 
-The same restart that re-bootstraps the mesh CA also resets the **served
-allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator writes with `c8s allowlist add` or `apply`. With
-`cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
-the install seed — workloads pulling those images are denied roughly one worker
-poll interval (~5s) later. CDS logs a warning at startup when persistence is
-off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
-chart-seeded component entries are unaffected — they are re-seeded and, unlike
-dynamic entries, are also admitted from the plugin's base allowlist. The restart also resets the allowlist version counter, and
+Pod recreation also resets the **served allowlist**. CDS seeds its store
+from the install seed at startup, then serves whatever an operator writes
+with `c8s allowlist add` or `apply`. With `cds.persistence.enabled=false`
+(the default), that store is an `emptyDir`: it survives a container restart,
+but drain, upgrade or scale-down can recreate the Pod and lose every
+operator-added entry. CDS logs a warning at startup when persistence is off.
+To keep dynamic entries across Pod recreation set
+`cds.persistence.enabled=true` (an RWO PVC); otherwise re-apply the entries
+after the store is recreated. The chart-seeded component entries are
+unaffected — they are re-seeded and, unlike dynamic entries, are also admitted
+from the plugin's base allowlist. Recreating the store also resets the
+allowlist version counter, and
 every enforcer ignores a served version at or below the one it last applied
 (`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
 that had applied version N stays on that policy until the restarted
@@ -514,8 +537,12 @@ It verifies **in-process** with `attestation-go` — the Go port of the same
 attestation-rs engine the cluster runs. That engine auto-detects the platform and
 AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
 classify. The only requirement on the machine running `c8s verify` is outbound
-HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
-report; no container runtime is needed.
+HTTPS to AMD KDS (`kdsintf.amd.com`) when a bare report's VCEK is not already
+cached; no container runtime is needed. `attestation-go` caches endorsement
+certificates under `os.UserCacheDir()/c8s/kds`, with `c8s` choosing that directory.
+Set `C8S_KDS_CACHE_DIR` to override it, or set it to an empty value to disable
+caching. Certificate verification still runs for every report; revocation data
+is never served from this disk cache. Cache failures do not block a successful fetch.
 
 ```bash
 # CDS's RA-TLS endpoint answers unattested clients:
@@ -625,9 +652,53 @@ Caveats the output surfaces:
 - **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
   certificate key, not a per-request nonce, so it proves "this key was born in a
   TEE with this measurement" but not "freshly now" (`fresh: false`).
+
+### Complete measured identity policies
+
+Image policy files preserve each image measurement, its TDX RTMR tuple and
+optional `approver_key` as one policy entry. The key is the exact PEM string;
+attestation-go's `refvalues` package maps it to `remote.ImagePin.Anchor`.
+`remote.EnforceImages` checks the image and calls `runtimemeasure.VerifyBinding`
+for that same entry. An image cannot borrow another entry's authorized key.
+c8s passes these entries through `remote.Policy.Images` to its attestation
+clients and injected workload helpers. Each verifier enforces the complete
+entry, including its launch-key binding when present.
+
+### Image policy inputs
+
+A complete image policy is a JSON document containing each trusted image's
+launch digest, TDX registers where applicable, and optional launch-key anchor.
+File and inline inputs use the same JSON format:
+
+| Input | Contents |
+|---|---|
+| `--image-policy-file policy.json` | Path to a complete JSON image policy. |
+| `--image-policy-json '{...}'` | The JSON document itself; supported by workload helpers such as `get-cert` and `get-secret`. |
+| `--measurements-file digests.txt` | Text file containing one launch digest per line; no per-image register or key bindings. Supported by `verify`, `allowlist`, and `secrets`. |
+
+Choose one complete policy source. A complete policy cannot be combined with
+independent digest or register inputs such as `--measurements`,
+`--measurements-file`, or `--rtmrs` (including the `--cds-` variants where
+provided). These independent inputs remain available for policies expressed as
+a digest list and a shared register set. Mesh peers and CDS can use separate
+files; `--cds-image-policy-file` selects the CDS-only policy for `ratls-mesh`.
+
+`c8s install` and `c8s render-values` accept image policies only when every
+image has identical RTMR pins and no `approver_key`. The Helm NRI installer
+configures CDS trust through a digest list and one shared register set, so
+these commands reject policies whose per-image register or launch-key
+constraints would be lost. Direct Helm installs with `cds.measurementsConfig`
+must also supply equivalent `cds.measurements` and `cds.rtmrs`; the chart
+rejects missing or mismatched pins while its NRI installer is enabled.
+Operator-key-bound policies require the baked node launch flow, which manages
+NRI separately with `nriImagePolicy.enabled=false`. CDS, mesh, and workload
+helpers that receive a complete image policy enforce its per-image tuples
+directly.
+
 ### Trust gate: `c8s get-kubeconfig`
 
-`c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
+`c8s get-kubeconfig` obtains an operator kubeconfig (or, with `--role
+log-reader`, a logs-only one) from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
 both on the RA-TLS connection and on a fresh nonce-bound attestation report:
 
@@ -678,10 +749,46 @@ to use the default flow.
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
 node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
-that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC.
+that group to the baked `c8s-node-operator` ClusterRole through ordinary
+RBAC. That role is deliberately not `cluster-admin`: the operator manages
+tenant workloads, namespaces, namespaced RBAC, ConfidentialWorkloads and
+network policy cluster-wide, and reads everything else, but holds no
+wildcard and nothing that reaches the guards or the host. See "Bounded
+operator" below.
+
+`--role log-reader` asks cred-release for `CN=log-reader, O=c8s:log-readers`
+instead, with a 24-hour default TTL. The baked `log-reader-rbac` AddOn binds
+that group to the `c8s-log-reader` ClusterRole: get/list/watch on pods and
+`pods/log`, namespaces and events, and nothing else (no ConfigMaps or
+Secrets, no exec). The role travels in the token-bound request body, so the
+same operator key authorizes both and neither the CSR nor the role can be
+swapped in transit; an unknown role is refused, never downgraded. Use it to
+hand `kubectl logs` access to someone who should not hold the operator role:
+
+```bash
+c8s get-kubeconfig --node "$GUEST_IP" --operator-key operator.key \
+  --image-manifest image-manifest.json --role log-reader --out logs.kubeconfig
+```
+
+The holder cannot renew the file; only the operator key can release another.
+`kubectl exec`, `attach`, `port-forward` and ephemeral containers are denied
+in admission for every credential by the baked `confos-pod-exec` policy
+(the kubelet's debugging handlers stay on for logs and have no logs-only
+switch).
+
 RKE2 reconciles AddOns asynchronously, so `cred-release.service` keeps its
-listener closed until `psa-ready.sh` sees that binding plus the baked
-`confos-psa-level` policy and binding. The gate then uses a temporary,
+listener closed until `psa-ready.sh` sees both bindings plus the baked
+`confos-psa-level`, `confos-operator-scope` and `confos-pod-exec` policies
+and bindings, and proves the operator-scope deny path with a server-side
+dry-run as a synthetic principal carrying the operator group. The gate also
+compares every live guard object against a reference copy of its manifest
+that mkosi.sync stages under `/usr/lib/confai/guards` on the read-only
+verity root: `server/manifests` sits on the writable scratch overlay
+because RKE2 stages its bundled charts there, so a shadowed or edited AddOn
+is caught by the comparison and keeps the listener closed. Root inside the
+guest can still edit live objects after the gate has passed; what it cannot
+do is change the reference the gate checks against without changing the
+image measurement. The gate then uses a temporary,
 namespace-create-only synthetic principal for two server-side dry-runs: a
 Restricted namespace must be admitted and a privileged namespace must be
 denied by that exact policy and validation. A released credential is therefore
@@ -693,13 +800,44 @@ is only meaningful where such a binding exists: on a cluster that is not the
 c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
 for a group that cluster already authorizes.
 
-Do not read the binding as a privilege boundary. In this node cluster
-`cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
-PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
-`kubectl` away. RBAC is used for revocability and policy, not containment; the
-credential's blast radius is bounded by who can obtain it (the attestation gate
-above), by the one-hour TTL, and by the verity root and per-boot ephemeral
-writable state of the guest.
+#### Bounded operator
+
+The guards (`confos-psa-level`, `confos-pod-exec`, `confos-operator-scope`,
+the two RBAC bindings) exist to hold against the credential holder, so no
+released credential may be able to disable them. Two independent layers
+enforce that:
+
+- **RBAC.** `c8s-node-operator` is an enumerated allowlist with no `*` in any
+  group, resource or verb. It grants no `bind`, `escalate` or `impersonate`,
+  no cluster-scoped RBAC writes, no admission-policy or webhook writes, no
+  `nodes/proxy`, `pods/proxy` or `services/proxy` (the kubelet-proxy
+  subresources reach the kubelet's exec endpoint without a `pods/exec`
+  admission check), no exec, attach, port-forward or ephemeral containers,
+  no `serviceaccounts/token`, no `podsecurityexemptions` grant, no
+  PersistentVolume, StorageClass, HelmChart, CustomResourceDefinition, Node,
+  APIService or CSR-approval writes. Namespaced Roles and RoleBindings are
+  allowed, and the apiserver's
+  escalation check keeps them within the operator's own permissions.
+- **Admission.** `confos-operator-scope` re-checks the same exclusions for
+  every principal in a `c8s:` group, whatever RBAC says: no write at all in
+  the privileged namespaces (`kube-system` and `local-path-storage`, which
+  are PodSecurity-exempt, and `c8s-system`, labelled privileged for the
+  baked operator), where a pod, an edited DaemonSet, a HelmChart or a
+  service-account token secret is root on the node; and none of the
+  cluster-scoped resources listed above. Its match condition selects the
+  `c8s:` groups before any validation runs, so system components and the
+  in-guest `rke2.yaml` are unaffected.
+
+The role therefore cannot lower a namespace below restricted, cannot exec,
+cannot write where PodSecurity does not apply, cannot mount the host through
+a PersistentVolume or a `nodePath` StorageClass, and cannot edit or delete
+any guard or binding. A credential leaked or over-shared is bounded by the
+same rules. Root-equivalent access to the guest exists only through the
+in-guest `rke2.yaml`, which never leaves the node.
+
+Every other bound still applies: who can obtain the credential (the
+attestation gate above), the TTL, and the verity root and per-boot
+ephemeral writable state of the guest.
 
 Revocation is a launch-time decision. Deleting or editing the live
 ClusterRoleBinding cuts access immediately, but only until the next boot: the

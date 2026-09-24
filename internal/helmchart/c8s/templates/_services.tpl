@@ -3,7 +3,26 @@
 {{/* c8s.attestationApiSocketPresent is non-empty when a node-local attestation
 API socket exists: either the chart runs the API or the node image bakes it. */}}
 {{- define "c8s.attestationApiSocketPresent" -}}
-{{- if or .Values.attestationApi.enabled .Values.node.bakedServices -}}true{{- end -}}
+{{- if or .Values.attestationApi.enabled .Values.node.baked -}}true{{- end -}}
+{{- end -}}
+
+{{/* Public launch policy only: the token-bearing /run/confos/launch is never
+mounted into pods. Directory requires verified staging to have completed. */}}
+{{- define "c8s.nodeConfigVolume" -}}
+{{- if .Values.node.baked }}
+- name: node-config
+  hostPath:
+    path: /run/c8s-node
+    type: Directory
+{{- end }}
+{{- end -}}
+
+{{- define "c8s.nodeConfigMount" -}}
+{{- if .Values.node.baked }}
+- name: node-config
+  mountPath: /run/c8s-node
+  readOnly: true
+{{- end }}
 {{- end -}}
 
 {{- define "c8s.attestationApiURL" -}}
@@ -23,7 +42,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 - name: attestation-api-socket
   hostPath:
     path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
-    type: DirectoryOrCreate
+    type: {{ ternary "Directory" "DirectoryOrCreate" .Values.node.baked }}
 {{- end }}
 {{- end -}}
 

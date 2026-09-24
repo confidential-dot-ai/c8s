@@ -39,7 +39,7 @@ func TestHoldersTracksCounts(t *testing.T) {
 // client holding the most gives entries up.
 func TestHoldersFollowsTheFullestClient(t *testing.T) {
 	h := newHolders()
-	for i := 0; i < 5*minShare; i++ {
+	for i := range 5 * minShare {
 		h.add("big", fmt.Sprintf("k%d", i))
 	}
 	h.add("small", "s1")
@@ -54,7 +54,7 @@ func TestHoldersFollowsTheFullestClient(t *testing.T) {
 		t.Fatalf("admit = %q, %v; want no client over its share", client, ok)
 	}
 
-	for i := 0; i < 5*minShare-1; i++ {
+	for i := range 5*minShare - 1 {
 		h.remove("big", fmt.Sprintf("k%d", i))
 	}
 	// Both hold one now, well under the floor, so nothing is taken from them.
@@ -72,12 +72,12 @@ func TestHoldersFollowsTheFullestClient(t *testing.T) {
 func TestHoldersFloorTheShare(t *testing.T) {
 	const capacity = 8192
 	h := newHolders()
-	for i := 0; i < minShare; i++ {
+	for i := range minShare {
 		h.add("client:honest", fmt.Sprintf("honest-%d", i))
 	}
 	// Far more clients than capacity/minShare, each holding one: the unfloored
 	// share here would be 1.
-	for i := 0; i < 4000; i++ {
+	for i := range 4000 {
 		h.add(fmt.Sprintf("client:flooder-%d", i), "k")
 	}
 
@@ -97,9 +97,9 @@ func TestHoldersAdmitAClientHoldingNothing(t *testing.T) {
 	h := newHolders()
 	// Sixteen clients at the per-client bound fill the store exactly, so every
 	// holder is at capacity/16 and nobody is above it.
-	for c := 0; c < capacity/perClient; c++ {
+	for c := range capacity / perClient {
 		client := fmt.Sprintf("client:holder-%d", c)
-		for i := 0; i < perClient; i++ {
+		for i := range perClient {
 			h.add(client, fmt.Sprintf("%s-%d", client, i))
 		}
 	}
@@ -120,7 +120,7 @@ func TestHoldersAdmitAClientHoldingNothing(t *testing.T) {
 // the growth this bounding exists to stop, and the key is caller-chosen.
 func TestHoldersLeaveNothingBehind(t *testing.T) {
 	h := newHolders()
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		client := fmt.Sprintf("client:%d", i)
 		h.add(client, "k")
 		h.remove(client, "k")

@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -28,8 +27,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/crane"
+	"github.com/confidential-dot-ai/c8s/internal/deployment"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -65,7 +67,7 @@ var (
 	installAttestEnabled      bool
 	installMeasurements       []string
 	installMeasurementsConfig string
-	installRTMRs              []string
+	installRegisters          []string
 	installInventoryCIDRs     []string
 )
 
@@ -296,7 +298,7 @@ func preflightRouterHostPort(ctx context.Context, chartPath, namespace string) e
 		return fmt.Errorf("kubectl get nodes: %w", err)
 	}
 	var nodes []string
-	for _, n := range strings.Split(strings.TrimSpace(string(nodesOut)), "\n") {
+	for n := range strings.SplitSeq(strings.TrimSpace(string(nodesOut)), "\n") {
 		if n = strings.TrimSpace(n); n != "" {
 			nodes = append(nodes, n)
 		}
@@ -327,7 +329,7 @@ func preflightRouterHostPort(ctx context.Context, chartPath, namespace string) e
 // bool at it, or false if a segment is missing or the leaf is not a bool.
 func boolAtPath(tree map[string]any, path string) bool {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
 			return false
@@ -763,7 +765,7 @@ func nestedMap(tree map[string]any, keys ...string) (map[string]any, bool) {
 // string at it, erroring if a segment is missing or the leaf is not a string.
 func stringAtPath(tree map[string]any, path string) (string, error) {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
 			return "", fmt.Errorf("path %q: %q is not a mapping", path, seg)
@@ -785,7 +787,7 @@ func stringAtPath(tree map[string]any, path string) (string, error) {
 // distinguishable from one that is absent.
 func valueAtPath(tree map[string]any, path string) (value any, ok bool) {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, isMap := cur.(map[string]any)
 		if !isMap {
 			return nil, false
@@ -982,7 +984,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
-		if warn, err := tdxRTMRPinWarning(installHardwarePlatform, installRTMRs, installValues); err != nil {
+		if warn, err := tdxRTMRPinWarning(installHardwarePlatform, installRegisters, installValues); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1219,14 +1221,12 @@ func applyNamespace(ctx context.Context, namespace string) error {
 // stricter (e.g. CIS-hardened restricted).
 func namespaceManifest(namespace string) ([]byte, error) {
 	ns := corev1.Namespace{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
-			Labels: map[string]string{
-				"pod-security.kubernetes.io/enforce": "privileged",
-				"pod-security.kubernetes.io/warn":    "privileged",
-				"pod-security.kubernetes.io/audit":   "privileged",
-			},
+		APIVersion: "v1", Kind: "Namespace",
+		Name: namespace,
+		Labels: map[string]string{
+			"pod-security.kubernetes.io/enforce": "privileged",
+			"pod-security.kubernetes.io/warn":    "privileged",
+			"pod-security.kubernetes.io/audit":   "privileged",
 		},
 	}
 	return json.Marshal(ns)
@@ -1378,7 +1378,7 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
 // ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
 // (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
-// tdx). aks uses the Azure vTPM path regardless of the CPU Family: the node's
+// tdx). aks uses the Azure vTPM path regardless of the CPU TEE type: the node's
 // vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
 // on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
 // aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
@@ -1397,8 +1397,9 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // GitOps/HelmRelease installs get it too), not emitted as a --set here; see
 // internal/helmchart/c8s/templates/webhook.yaml.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
-	if !slices.Contains(allowedCvmModes, cvmMode) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
+	bakedAttestationAndNRIPlugin, err := deployment.BakedAttestationAndNRIPlugin(cvmMode)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateHardwarePlatform(hardwarePlatform); err != nil {
 		return nil, err
@@ -1477,7 +1478,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// baked form — the pins below are the one thing an image built before this
 	// release cannot carry, and the installer is the only path that reaches the
 	// baked plugin's config.
-	if cvmMode == "bare-metal" {
+	if bakedAttestationAndNRIPlugin {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
 			"--set", "nriImagePolicy.baked=true",
@@ -1515,7 +1516,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	for i, pin := range refvalues.FormatRTMRPins(rtmrs) {
+	for i, pin := range refvalues.FormatRegisterPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
@@ -2112,11 +2113,11 @@ func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (m
 func overlaySetArgs(tree map[string]any, setArgs []string) error {
 	for i := 0; i+1 < len(setArgs); i += 2 {
 		flag, kv := setArgs[i], setArgs[i+1]
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
+		before, after, ok := strings.Cut(kv, "=")
+		if !ok {
 			continue
 		}
-		path, raw := kv[:eq], kv[eq+1:]
+		path, raw := before, after
 		var err error
 		switch flag {
 		case "--set":
@@ -2207,8 +2208,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the router attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
 	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=bare-metal/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=bare-metal/gke/aks this is the node image's manifest.json value")
-	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
-	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
+	cmdsutil.BindImagePolicyFlags(installCmd.Flags(), &installMeasurementsConfig, nil, "", "pins CDS, mesh and NRI; Helm requires unanchored images with identical RTMR pins; excludes --measurements and --rtmrs")
+	installCmd.Flags().StringSliceVar(&installRegisters, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")

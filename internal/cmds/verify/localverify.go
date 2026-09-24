@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -23,16 +22,13 @@ import (
 // engine consumes it on the SNP path only, and silently drops it on TDX.
 func verifyInProcess(ctx context.Context, ev *evidence, policy *ratls.VerifyPolicy, initDataHash []byte, minTCB *teetypes.SnpTcb) (*teetypes.VerificationResult, error) {
 	res, err := localverify.Verify(ctx, ev.platform, ev.rawEvidence, localverify.Params{
-		VerifyParams: teetypes.VerifyParams{
-			ExpectedReportData:   ev.erd,
-			ExpectedInitDataHash: initDataHash,
-			AllowDebug:           policy.Policy.AllowDebug,
-			MinTCB:               minTCB,
-		},
+		ExpectedReportData:   ev.erd,
+		ExpectedInitDataHash: initDataHash,
+		AllowDebug:           policy.Policy.AllowDebug,
+		MinTCB:               minTCB,
 	})
 	if err != nil {
-		var ce *localverify.CollateralError
-		if errors.As(err, &ce) {
+		if _, ok := errors.AsType[*localverify.CollateralError](err); ok {
 			return nil, &connectError{err: err}
 		}
 		return nil, &securityError{err: err}

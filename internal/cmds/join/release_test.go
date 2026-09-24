@@ -62,7 +62,7 @@ func TestReleaseHandler(t *testing.T) {
 		return newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
 	}
 
-	t.Run("attested authorized follower gets the token", func(t *testing.T) {
+	t.Run("attested authorized agent gets the token", func(t *testing.T) {
 		h := testHandler(t, okAPI(t), testToken+"\n")
 		rec := doTLS(h, http.MethodGet, "/join-token", []*x509.Certificate{attestedLeaf(t, tdxEnvelope)})
 		if rec.Code != http.StatusOK {

@@ -119,8 +119,7 @@ func IsNotFound(err error) bool {
 // craneError attaches the subcommand, reference, and captured stderr — the
 // registry's own error text — to a failed crane invocation.
 func craneError(sub, ref string, err error) error {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		return fmt.Errorf("crane %s %q: %w: %s", sub, ref, err, strings.TrimSpace(string(ee.Stderr)))
 	}
 	return fmt.Errorf("crane %s %q: %w", sub, ref, err)

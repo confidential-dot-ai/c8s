@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
 // options holds the flags shared by every subcommand.
@@ -25,12 +24,12 @@ type options struct {
 
 // NewCmd returns the `c8s secrets` command tree.
 func NewCmd() *cobra.Command {
-	return newCmd(localverify.Verify)
+	return newCmd(nil)
 }
 
 // newCmd is the injectable constructor behind NewCmd.
-func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{Options: cdsconn.Options{Verify: verify}}
+func newCmd(verifier cdsconn.PinVerifier) *cobra.Command {
+	o := &options{Options: cdsconn.Options{Verifier: verifier}}
 	cmd := &cobra.Command{
 		Use:   "secrets",
 		Short: "Manage the CDS secret store",

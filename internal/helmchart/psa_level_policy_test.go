@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 )
 
@@ -15,28 +15,52 @@ import (
 // applied by RKE2, not the chart, so it is read from the image tree here.
 const psaLevelPolicyPath = "../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
 
-func loadPSALevelPolicy(t *testing.T) (admissionregv1.ValidatingAdmissionPolicy, admissionregv1.ValidatingAdmissionPolicyBinding) {
+// loadImagePolicy reads a baked ValidatingAdmissionPolicy and its binding, both
+// named name, from the node-image manifest at path.
+func loadImagePolicy(t *testing.T, path, name string) (admissionregv1.ValidatingAdmissionPolicy, admissionregv1.ValidatingAdmissionPolicyBinding) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Clean(psaLevelPolicyPath))
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		t.Fatalf("read %s: %v", psaLevelPolicyPath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	var vap admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, string(raw), "ValidatingAdmissionPolicy", "confos-psa-level", &vap) {
-		t.Fatal("ValidatingAdmissionPolicy confos-psa-level not in manifest")
+	if !findDoc(t, string(raw), "ValidatingAdmissionPolicy", name, &vap) {
+		t.Fatalf("ValidatingAdmissionPolicy %s not in %s", name, path)
 	}
 	var binding admissionregv1.ValidatingAdmissionPolicyBinding
-	if !findDoc(t, string(raw), "ValidatingAdmissionPolicyBinding", "confos-psa-level", &binding) {
-		t.Fatal("ValidatingAdmissionPolicyBinding confos-psa-level not in manifest")
+	if !findDoc(t, string(raw), "ValidatingAdmissionPolicyBinding", name, &binding) {
+		t.Fatalf("ValidatingAdmissionPolicyBinding %s not in %s", name, path)
 	}
 	return vap, binding
 }
 
-func TestPSALevelPolicyShape(t *testing.T) {
-	vap, binding := loadPSALevelPolicy(t)
+// checkDenyPolicyShape asserts what every baked guard policy shares: it fails
+// closed, its binding names it, denies (never warns or audits) and does not
+// narrow it, and every validation carries a message.
+func checkDenyPolicyShape(t *testing.T, vap admissionregv1.ValidatingAdmissionPolicy, binding admissionregv1.ValidatingAdmissionPolicyBinding) {
+	t.Helper()
 	if vap.Spec.FailurePolicy == nil || *vap.Spec.FailurePolicy != admissionregv1.Fail {
-		t.Error("failurePolicy must be Fail so an evaluation error denies the write")
+		t.Error("failurePolicy must be Fail so an evaluation error denies the request")
 	}
+	if binding.Spec.PolicyName != vap.Name {
+		t.Errorf("binding names policy %q, want %q", binding.Spec.PolicyName, vap.Name)
+	}
+	if len(binding.Spec.ValidationActions) != 1 || binding.Spec.ValidationActions[0] != admissionregv1.Deny {
+		t.Errorf("binding must Deny, got %v", binding.Spec.ValidationActions)
+	}
+	if binding.Spec.MatchResources != nil {
+		t.Error("binding must not narrow the policy")
+	}
+	for _, v := range vap.Spec.Validations {
+		if v.Message == "" {
+			t.Errorf("validation %q has no message", v.Expression)
+		}
+	}
+}
+
+func TestPSALevelPolicyShape(t *testing.T) {
+	vap, binding := loadImagePolicy(t, psaLevelPolicyPath, "confos-psa-level")
+	checkDenyPolicyShape(t, vap, binding)
 	if len(vap.Spec.Validations) != 1 {
 		t.Fatalf("expected one validation, got %d", len(vap.Spec.Validations))
 	}
@@ -63,12 +87,6 @@ func TestPSALevelPolicyShape(t *testing.T) {
 		if !ops[op] {
 			t.Errorf("matchConstraints does not match %s", op)
 		}
-	}
-	if binding.Spec.PolicyName != vap.Name {
-		t.Errorf("binding names policy %q, want %q", binding.Spec.PolicyName, vap.Name)
-	}
-	if len(binding.Spec.ValidationActions) != 1 || binding.Spec.ValidationActions[0] != admissionregv1.Deny {
-		t.Errorf("binding must Deny, got %v", binding.Spec.ValidationActions)
 	}
 }
 
@@ -125,7 +143,7 @@ func nsWithLabels(labels map[string]any) map[string]any {
 }
 
 func TestPSALevelPolicyExpression(t *testing.T) {
-	vap, _ := loadPSALevelPolicy(t)
+	vap, _ := loadImagePolicy(t, psaLevelPolicyPath, "confos-psa-level")
 	expr := vap.Spec.Validations[0].Expression
 	const enforce = "pod-security.kubernetes.io/enforce"
 	const version = "pod-security.kubernetes.io/enforce-version"

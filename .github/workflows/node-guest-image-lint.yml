@@ -40,12 +40,30 @@ on:
       - ".github/workflows/c8s-image.yml"
       - ".github/workflows/c8s-image-publish.yml"
       - ".github/workflows/c8s-image-manual.yml"
+      # The runtime wrapper the image's containerd config names: the gate
+      # pins its real-runtime path against mkosi.sync.
+      - "internal/cmds/c8srunc/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  containerd:
+    name: pinned RKE2 containerd config
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check RKE2-generated config with bundled containerd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: bash node-guest-image/tests/containerd-test.sh
+
   lint:
     name: node-guest-image invariants
     runs-on: ubuntu-latest
@@ -192,6 +210,31 @@ jobs:
             -manifest "$manifests/nvidia-device-plugin.yaml" \
             -exclude-ref busybox
 
+  containerd-runtime-handlers:
+    name: every pod runtime reaches the measured wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - name: Render the effective containerd config and check its handlers
+        # containerdcheck renders RKE2's own base template and merges the
+        # drop-ins containerd imports, so a handler
+        # that would reach an unwrapped runc fails here instead of shipping an
+        # image where `kubectl exec` works.
+        run: |
+          set -euo pipefail
+          dir=node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd
+          go run ./node-guest-image/c8s/containerdcheck -config-dir "$dir"
+          # The same check must fail when RKE2's runtime auto-detection finds
+          # another runtime on the node's PATH.
+          if go run ./node-guest-image/c8s/containerdcheck -config-dir "$dir" \
+               -extra-runtime crun=/usr/bin/crun 2>/dev/null; then
+            echo "::error::containerdcheck accepted an unwrapped auto-detected runtime"
+            exit 1
+          fi
+
   gpu-label:
     name: gpu-node-label logic
     runs-on: ubuntu-latest
@@ -275,3 +318,27 @@ jobs:
 
       - name: Run the systemd-level harness
         run: make test-node-guest-image-role-systemd
+
+  baked-workloads:
+    name: rendered workloads and measured image archives
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+
+      - name: Check the image archiver and offline fixture
+        run: shellcheck node-guest-image/c8s/airgap-images.sh node-guest-image/tests/airgap-images-test.sh
+
+      - name: Validate complete workloads and preserved image pins
+        run: |
+          go test -count=1 ./cmd/c8s -run TestNodeImage
+          make test-node-guest-image-airgap

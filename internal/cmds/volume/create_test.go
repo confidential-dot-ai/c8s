@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -146,7 +147,7 @@ func TestWriteEscrowIsOwnerOnlyAndReloadable(t *testing.T) {
 	}
 }
 
-func TestPrintResultNamesSerialAnnotationAndExactGrant(t *testing.T) {
+func TestPrintResultNamesSerialAnnotationGrantAndMountPolicy(t *testing.T) {
 	var out bytes.Buffer
 	printResult(&out, createConfig{
 		name: "weights", out: "/tmp/vol.img", escrowOut: "/tmp/escrow.json", node: "node-1",
@@ -157,6 +158,7 @@ func TestPrintResultNamesSerialAnnotationAndExactGrant(t *testing.T) {
 		`confidential.ai/c8s-volumes: "weights=/tenant-a/volumes/weights"`,
 		"kubernetes.io/hostname: node-1",
 		`"read": ["/tenant-a/volumes/weights"]`,
+		`"mounts": {"policy": "any"}`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q:\n%s", want, got)
@@ -180,12 +182,7 @@ func TestNewCmdRegistersCreate(t *testing.T) {
 }
 
 func containsStr(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hay, needle)
 }
 
 func TestWriteEscrowReportsAnUnwritableDestination(t *testing.T) {

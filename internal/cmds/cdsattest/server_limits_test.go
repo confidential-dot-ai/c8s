@@ -159,7 +159,7 @@ func TestAttestPQMetersEachClientSeparately(t *testing.T) {
 	_, ts, _ := newBurstTestServer(t, burst)
 
 	var served, limited int
-	for i := 0; i < 3*burst; i++ {
+	for range 3 * burst {
 		switch code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code {
 		case http.StatusOK:
 			served++
@@ -219,7 +219,7 @@ func TestShippedBurstCoversASessionFleet(t *testing.T) {
 
 	// Each session costs one attest-pq, and every request here lands in the
 	// one bucket the client is charged.
-	for i := 0; i < legitimateSessions; i++ {
+	for i := range legitimateSessions {
 		if _, id := establishSession(t, ts.URL, testNonce(t)); id == "" {
 			t.Fatalf("session %d was not established", i)
 		}
@@ -236,7 +236,7 @@ func TestTunnelTrafficIsNotChargedToTheAttestationBudget(t *testing.T) {
 
 	nonce := testNonce(t)
 	channel, sessionID := establishSession(t, ts.URL, nonce)
-	for i := 0; i < applicationRequests; i++ {
+	for i := range applicationRequests {
 		if code := tunnelStatus(t, ts.URL, sessionID, channel, i); code != http.StatusOK {
 			t.Fatalf("tunnel request %d: got %d, want 200", i, code)
 		}
@@ -308,7 +308,7 @@ func TestMaintenanceReclaimsQuietLimiterBuckets(t *testing.T) {
 		srv.sweepEvery = time.Hour // not what this test is about
 	})
 
-	for i := 0; i < clients; i++ {
+	for i := range clients {
 		if code := postAttestPQAs(t, ts.URL, fmt.Sprintf("203.0.113.%d", i), testNonce(t)); code != http.StatusOK {
 			t.Fatalf("client %d claiming a bucket: got %d, want 200", i, code)
 		}
@@ -317,8 +317,7 @@ func TestMaintenanceReclaimsQuietLimiterBuckets(t *testing.T) {
 		t.Fatalf("the limiter meters %d clients, want %d", got, clients)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go srv.maintain(ctx)
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -426,7 +425,7 @@ func TestSessionlessFloodCannotDenyALiveSession(t *testing.T) {
 	channel, sessionID := establishSession(t, ts.URL, testNonce(t))
 
 	client := &http.Client{}
-	for i := 0; i < floodPrefixes; i++ {
+	for i := range floodPrefixes {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+"/.well-known/c8s/tunnel", bytes.NewReader([]byte("junk")))
 		if err != nil {
 			t.Fatal(err)
@@ -559,14 +558,14 @@ func TestRefusedAttestPQMintsNoEvidence(t *testing.T) {
 	srv, ts, evidence := newMeteredTestServer(t)
 
 	const client = "client:203.0.113.7"
-	for i := 0; i < maxSessionsPerClient; i++ {
+	for i := range maxSessionsPerClient {
 		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{createdAt: time.Now(), lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling the client to its bound: %v", err)
 		}
 	}
 	minted := evidence.calls.Load()
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusTooManyRequests {
 			t.Fatalf("attest-pq at the client's session bound: got %d, want 429", code)
 		}
@@ -594,7 +593,7 @@ func TestAttestPQRefusesOnceEveryHolderIsAtTheFloor(t *testing.T) {
 	})
 	minted := evidence.calls.Load()
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusServiceUnavailable {
 			t.Fatalf("attest-pq against a pool with nothing to give up: got %d, want 503", code)
 		}
@@ -640,7 +639,7 @@ func TestSessionBoundHoldsUnderConcurrency(t *testing.T) {
 	noteRaceCoverage(t)
 	srv, _, _ := newMeteredTestServer(t)
 
-	for i := 0; i < maxSessionsPerClient-1; i++ {
+	for i := range maxSessionsPerClient - 1 {
 		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling to one under the bound: %v", err)
 		}
@@ -650,7 +649,7 @@ func TestSessionBoundHoldsUnderConcurrency(t *testing.T) {
 		var wg sync.WaitGroup
 		var accepted atomic.Int64
 		start := make(chan struct{})
-		for i := 0; i < racers; i++ {
+		for i := range racers {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
@@ -718,7 +717,7 @@ func TestSessionsAreBoundedPerClient(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	const client = "client:203.0.113.7"
 
-	for i := 0; i < maxSessionsPerClient; i++ {
+	for i := range maxSessionsPerClient {
 		if err := srv.addSession(client, "session-"+strconv.Itoa(i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d under the bound: %v", i, err)
 		}
@@ -745,7 +744,7 @@ const (
 // bound against a number a NAT actually reaches.
 func TestOneAddressMayHoldACrowdsWorthOfSessions(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
-	for i := 0; i < entitledSessions; i++ {
+	for i := range entitledSessions {
 		if err := srv.addSession("client:203.0.113.7", fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d of one address: %v", i, err)
 		}
@@ -756,7 +755,7 @@ func TestOneAddressMayHoldACrowdsWorthOfSessions(t *testing.T) {
 // rather than against itself.
 func TestTheStoresHoldAFleet(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
-	for i := 0; i < entitledStore; i++ {
+	for i := range entitledStore {
 		client := fmt.Sprintf("client:%d", i%64)
 		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d of a fleet: %v", i, err)
@@ -810,7 +809,7 @@ func TestFloodCannotEvictAnHonestSession(t *testing.T) {
 
 	// It then keeps churning: every insert past the bound must cost it one of
 	// its own, however idle the honest session looks next to its warm ones.
-	for i := 0; i < 4*maxSessionsPerClient; i++ {
+	for i := range 4 * maxSessionsPerClient {
 		client := fmt.Sprintf("client:churn-%d", i/maxSessionsPerClient)
 		if err := srv.addSession(client, fmt.Sprintf("churn-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("attacker insert %d into a full pool: %v", i, err)
@@ -974,7 +973,7 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 
 	const victim = "client:victim"
-	for i := 0; i < maxSessionsPerClient; i++ {
+	for i := range maxSessionsPerClient {
 		if err := srv.addSession(victim, fmt.Sprintf("victim-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("victim session %d: %v", i, err)
 		}
@@ -984,7 +983,7 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 	// Every address the attacker adds divides the share further; none of them
 	// may push the victim below the floor. The store settles well inside this,
 	// and every insert past that is a refusal re-asserting the same state.
-	for i := 0; i < 2*maxSessions; i++ {
+	for i := range 2 * maxSessions {
 		_ = srv.addSession(fmt.Sprintf("client:churn-%d", i), fmt.Sprintf("churn-%d", i), establishedSession{lastUsed: time.Now()})
 
 		srv.mu.Lock()
@@ -1068,7 +1067,7 @@ func TestReadyzIsCached(t *testing.T) {
 	if err := os.WriteFile(identity.certFile, []byte("not a certificate"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		if _, cached := probe("127.0.0.1:5555", "198.51.100.9"); cached != reason {
 			t.Fatalf("readiness recomputed inside its TTL on request %d: reason %q became %q", i, reason, cached)
 		}
@@ -1083,7 +1082,7 @@ func TestReadyzIsCached(t *testing.T) {
 
 	// However hard the public path is driven, the probe still answers: the
 	// gate is not metered, so a flood cannot deschedule the pod.
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		probe("127.0.0.1:5555", "192.0.2.50")
 	}
 	if code, _ := probe("127.0.0.1:5555", "10.42.0.1"); code == http.StatusTooManyRequests {
@@ -1102,7 +1101,7 @@ func TestTunnelIsCappedPerClientAcrossSessions(t *testing.T) {
 
 	channel, sessionID := establishSession(t, ts.URL, testNonce(t))
 	var limited int
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		if tunnelStatus(t, ts.URL, sessionID, channel, i) == http.StatusTooManyRequests {
 			limited++
 		}
@@ -1120,7 +1119,7 @@ func TestAttestPQRefusesWhenTheClientIsAtItsBound(t *testing.T) {
 
 	// The bucket a request through the front door is charged to.
 	const client = "client:203.0.113.7"
-	for i := 0; i < maxSessionsPerClient; i++ {
+	for i := range maxSessionsPerClient {
 		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("filling the client to its bound: %v", err)
 		}

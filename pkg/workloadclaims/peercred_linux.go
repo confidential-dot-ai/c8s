@@ -81,7 +81,7 @@ func (p Peer) IsAlive() bool {
 	fds := []unix.PollFd{{Fd: int32(p.pidfd), Events: unix.POLLIN}}
 	// Poll with timeout 0 is non-blocking; bound the (rare) EINTR retry rather
 	// than spin, and fail closed if it never settles.
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		_, err := unix.Poll(fds, 0)
 		if errors.Is(err, unix.EINTR) {
 			continue

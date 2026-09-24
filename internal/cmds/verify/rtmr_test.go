@@ -9,7 +9,7 @@ import (
 
 func sha384Hex(b byte) string { return strings.Repeat(hex.EncodeToString([]byte{b}), 48) }
 
-// Pin parsing itself is refvalues.ParseRTMRPins, tested in attestation-go; the tests
+// Pin parsing itself is refvalues.ParseRegisterPins, tested in attestation-go; the tests
 // here cover the flag rules this command layers on top.
 
 func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
@@ -17,8 +17,8 @@ func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPolicy: %v", err)
 	}
-	if len(p.policy.Policy.RTMRs) != 1 || hex.EncodeToString(p.policy.Policy.RTMRs[2]) != sha384Hex(0x22) {
-		t.Fatalf("policy RTMRs = %v, want RTMR[2] pinned", p.policy.Policy.RTMRs)
+	if len(p.policy.Policy.Registers) != 1 || hex.EncodeToString(p.policy.Policy.Registers[2]) != sha384Hex(0x22) {
+		t.Fatalf("policy Registers = %v, want RTMR[2] pinned", p.policy.Policy.Registers)
 	}
 }
 

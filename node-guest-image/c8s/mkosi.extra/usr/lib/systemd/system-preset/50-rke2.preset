@@ -1,11 +1,12 @@
 # Presets are applied at image build time. Both RKE2 units are enabled;
 # the authenticated launch verdict selects exactly one at each boot.
-# The packaged nginx default must never open an unauthenticated listener.
-disable nginx.service
 enable containerd-data-disk.service
 enable models-disk.service
 enable nri-node-ip.service
 enable gpu-node-label.service
+# Fail closed on a non-CC or unattested GPU before nvidia-cc-ready sets the
+# CC Ready state; RequiredBy nvidia-cc-ready and the rke2 pair so a failed
+# gate never readies or schedules the GPU.
 enable gpu-cc-enforce.service
 enable scratch-enforce.service
 enable c8s-modules-latch.service
@@ -15,14 +16,10 @@ enable c8s-join.service
 enable rke2-server.service
 enable rke2-agent.service
 enable systemd-timesyncd.service
+# Makes time-sync.target block until the clock is actually synchronised,
+# which gpu-cc-enforce now orders after (NRAS JWT nbf).
+enable systemd-time-wait-sync.service
 enable cred-release.service
-enable cds.service
-enable ratls-mesh.service
-enable ratls-mesh-iptables.service
-enable c8s-get-cert.service
-enable cds-attest.service
-enable allowlist-proxy.service
-enable c8s-nginx.service
 enable attest-proxy.service
 # Check the running LSM and exercise a real policy before RKE2 can start.
 enable apparmor-enforce.service

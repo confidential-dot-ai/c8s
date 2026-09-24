@@ -4,51 +4,40 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"path/filepath"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
-// installPins resolves the pins install fans into the chart, from either the
-// flat flags or a measurements config. In config mode the file travels to the
-// components that match whole images, and the same values are also fanned out
-// flat for consumers that read a plain digest list, such as the NRI plugin.
-func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
-	if installMeasurementsConfig == "" {
-		digests, err = refvalues.ParseHexMeasurementsList(installMeasurements)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("--measurements: %w", err)
-		}
-		rtmrs, err = refvalues.ParseRTMRPins(installRTMRs)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("--rtmrs: %w", err)
-		}
-		return digests, rtmrs, nil, nil
+// installPins resolves the pins install supplies to the chart. Complete policies
+// must also be expressible by the NRI installer's digest/common-register inputs;
+// reject policies that would lose an image's register or launch-key constraint.
+// Which TEE family pins which registers is refvalues' business; this only asks
+// whether the set survives being flattened into one digest list and one map.
+func installPins() (digests [][]byte, registers map[int][]byte, helmArgs []string, err error) {
+	source := cmdsutil.ImagePolicySource{File: installMeasurementsConfig}
+	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, Registers: installRegisters}
+	if !source.IsSet() {
+		policy, err := source.Load(pins)
+		return policy.Measurements, policy.Registers, nil, err
 	}
-	if len(installMeasurements) > 0 || len(installRTMRs) > 0 {
-		return nil, nil, nil, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
+	set, err := source.LoadValues(pins)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// helm reads the path itself, so hand it one that does not depend on the
 	// working directory the install happened to run from.
 	path, err := filepath.Abs(installMeasurementsConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("--measurements-config: %w", err)
-	}
-	set, err := refvalues.Load(path)
-	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("--image-policy-file: %w", err)
 	}
 	if set.HasAnchors() {
-		return nil, nil, nil, fmt.Errorf("operator_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
+		return nil, nil, nil, fmt.Errorf("approver_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
 	}
-	common, uniform := set.CommonRTMRs()
+	common, uniform := set.CommonRegisters()
 	if !uniform {
-		// The flat values carry one register set, so images that disagree can
-		// only be fanned out as digests.
-		slog.Warn("measurements config pins different registers per image: components matching whole images keep them, the flat values are digest-only",
-			"images", len(set.Images))
+		return nil, nil, nil, fmt.Errorf("--image-policy-file contains different register pins per image; Helm installation requires identical register pins because the NRI installer accepts one shared register set")
 	}
 	// The chart takes the file's content; helm reads the same path this
 	// command just validated.

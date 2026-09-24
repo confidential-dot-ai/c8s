@@ -125,7 +125,7 @@ func policyEntry(t *testing.T, platform teetypes.PlatformType, key []byte) remot
 	}
 	e := remote.ImagePin{Name: "authorized", Digest: decode(digestA), Anchor: key}
 	if platform == teetypes.PlatformTDX {
-		e.RTMRs = map[int][]byte{1: decode(rtmr1A), 2: decode(rtmr2A)}
+		e.Registers = map[int][]byte{1: decode(rtmr1A), 2: decode(rtmr2A)}
 	}
 	return e
 }
@@ -255,7 +255,7 @@ func TestLoadPeerPolicy(t *testing.T) {
 	}
 	for _, idx := range []int{1, 2} {
 		e := policyEntry(t, teetypes.PlatformTDX, key)
-		delete(e.RTMRs, idx)
+		delete(e.Registers, idx)
 		if _, err := loadPeerPolicy(policyFile(t, teetypes.PlatformTDX, e), "tdx", "", time.Second, false); err == nil {
 			t.Fatalf("missing RTMR[%d] accepted", idx)
 		}
@@ -284,7 +284,7 @@ func TestVerifyPeerIdentity(t *testing.T) {
 				}, ratls.ErrPolicyViolation},
 				{"replayed evidence wrong key", func(r *remote.VerifyResponse) { r.Result.ReportDataMatch = teetypes.Ptr(false) }, ratls.ErrKeyBinding},
 				{"signature invalid", func(r *remote.VerifyResponse) { r.Result.SignatureValid = false }, ratls.ErrSignatureInvalid},
-				{"verified family mismatch", func(r *remote.VerifyResponse) { r.Result.Platform = "unexpected" }, ratls.ErrPolicyViolation},
+				{"verified family mismatch", func(r *remote.VerifyResponse) { r.Result.Platform = "unexpected" }, remote.ErrPlatformMismatch},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					resp := verifyResp(platform, key)

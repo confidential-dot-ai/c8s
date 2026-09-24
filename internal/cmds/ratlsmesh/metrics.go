@@ -56,7 +56,7 @@ type metrics struct {
 	resolverCacheSize            prometheus.Gauge
 	resolverLocalCIDRs           prometheus.Gauge
 	resolverLastEvent            prometheus.Gauge
-	certRotationFailures         prometheus.Counter
+	certRotationFailures         *prometheus.CounterVec
 	attestationFailures          prometheus.Counter
 	acceptErrors                 prometheus.Counter
 	tlsSessionResumptions        prometheus.Counter
@@ -181,10 +181,12 @@ func newMetrics() *metrics {
 		Name: "ratls_mesh_resolver_last_event_timestamp_seconds",
 		Help: "Unix timestamp of last K8s informer event.",
 	})
-	m.certRotationFailures = factory.NewCounter(prometheus.CounterOpts{
+	m.certRotationFailures = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratls_mesh_cert_rotation_failures_total",
-		Help: "Background RA-TLS certificate rotation failures.",
-	})
+		Help: "Background RA-TLS certificate rotation failures by certificate role.",
+	}, []string{"role"})
+	m.certRotationFailures.WithLabelValues("server")
+	m.certRotationFailures.WithLabelValues("client")
 	m.attestationFailures = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_attestation_failures_total",
 		Help: "RA-TLS peer attestation verification failures.",

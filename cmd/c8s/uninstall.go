@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,15 +25,15 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // hostSweepScript sweeps c8s host state off a single node (see the script
-// header for the full inventory). Kept as a standalone POSIX-shell file (like
-// the chart's files/scripts/*) so it gets shellcheck; it runs as the init
-// container of the sweep DaemonSet built in hostSweepDaemonSet.
-//
-//go:embed host-sweep.sh
-var hostSweepScript string
+// header for the full inventory). It lives in the chart
+// (files/scripts/host-sweep.sh) so the allowlist pin and the sweep DaemonSet
+// built in hostSweepDaemonSet share one source.
+var hostSweepScript = helmchart.HostSweepScript()
 
 var (
 	uninstallNamespace       string
@@ -65,6 +64,13 @@ type hostUninstallConfig struct {
 	Distro              string
 	ContainerdConfigDir string
 	SweepImage          string
+	// SweepArgv/PauseArgv are the OCI argv the sweep DaemonSet's init and
+	// pause containers run. Default: this CLI's embedded sweep spec; when the
+	// release exists, resolveSweepArgvs replays the argv its allowlist seed
+	// pins instead, so a newer CLI's sweep stays admissible on a cluster
+	// installed by an older chart (the pin is rendered at install time).
+	SweepArgv []string
+	PauseArgv []string
 	// NRI image-policy host paths (nriImagePolicy.*): where the chart's
 	// installer DaemonSet wrote the plugin, or where the node image baked it.
 	// The sweep distinguishes the two via a baked-only marker on the host.
@@ -161,6 +167,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 			cfg, err = hostConfigFromValues(values)
 			if err != nil {
 				return fmt.Errorf("read host config from release values: %w", err)
+			}
+			if uninstallHostSweep {
+				cfg.SweepArgv, cfg.PauseArgv = resolveSweepArgvs(ctx, uninstallNamespace, uninstallRelease, cfg)
 			}
 		} else {
 			fmt.Fprintf(os.Stdout, "+ release %q not found — sweeping with chart defaults and detected distro\n", uninstallRelease)
@@ -292,6 +301,12 @@ func chartDefaultHostConfig(ctx context.Context) (hostUninstallConfig, error) {
 	fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
 	if nri, ok := nestedMap(tree, "nriImagePolicy"); ok {
 		nri["distro"] = distro
+		// With the release gone the baked plugin still enforces the
+		// release-pinned nri-image-policy digest; sweeping with the CLI's own
+		// version tag resolves to that same digest on a same-version install.
+		if img, ok := nestedMap(nri, "image"); ok {
+			img["tag"] = resolveImageTag()
+		}
 	}
 
 	cfg, err := hostConfigFromValues(tree)
@@ -317,6 +332,8 @@ func hostConfigFromValues(tree map[string]any) (hostUninstallConfig, error) {
 	if err != nil {
 		return hostUninstallConfig{}, err
 	}
+	cfg.SweepArgv = []string{"/bin/sh", "-c", hostSweepScript}
+	cfg.PauseArgv = []string{"/bin/sleep", "2147483647"} // busybox sleep has no "infinity"
 
 	cfg = nriConfigFromValues(tree, cfg)
 	cfg.ImagePullSecretRef = imagePullSecretNames(tree)
@@ -396,6 +413,104 @@ func hostRestartCommand(distro string) string {
 		return "if systemctl is-active --quiet rke2-server; then systemctl restart rke2-server; else systemctl restart rke2-agent; fi"
 	}
 	return "systemctl restart containerd"
+}
+
+// resolveSweepArgvs replays the sweep and pause argv the release's allowlist
+// seed pins for the sweep image's digest: c8s.argvPinnedEntries pins them on
+// the image's entry — the script shape marked by the script's own "c8s host
+// sweep" banner, the pause as the one shape not running /bin/sh -c. The pin
+// is rendered by the installed chart, so replaying it — rather than running
+// this CLI's embedded spec — keeps the sweep admissible when the CLI and the
+// install drift versions. Any miss falls back to the embedded defaults.
+func resolveSweepArgvs(ctx context.Context, namespace, release string, cfg hostUninstallConfig) (sweep, pause []string) {
+	pinned, err := seedPinnedSweepArgvs(ctx, namespace, release, cfg.SweepImage)
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "+ allowlist seed has no usable host-sweep pin (%v) — using this CLI's embedded sweep spec\n", err)
+		return cfg.SweepArgv, cfg.PauseArgv
+	}
+	fmt.Fprintf(os.Stdout, "+ host sweep argv replayed from the release's allowlist seed\n")
+	return pinned[0], pinned[1]
+}
+
+// seedPinnedSweepArgvs reads the release's allowlist seed ConfigMap (which
+// helm uninstall is about to delete) and returns the [sweep, pause] argv the
+// seed's entry for image's digest pins. The parser sorts each entry's
+// containers, so the shapes are identified by content, not position: the
+// script by its banner, the pause as the entry's one non-/bin/sh -c shape.
+// Ambiguity is an error — replaying the wrong argv fails closed at admission.
+func seedPinnedSweepArgvs(ctx context.Context, namespace, release, image string) ([][]string, error) {
+	_, digest, ok := strings.Cut(image, "@")
+	if !ok {
+		return nil, fmt.Errorf("sweep image %q is not digest-pinned", image)
+	}
+	d, err := types.ParseDigest(digest)
+	if err != nil {
+		return nil, fmt.Errorf("sweep image digest: %w", err)
+	}
+	entryName := allowlist.DigestEntryName(d, image)
+	cmName := seedConfigMapName(release)
+
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "configmap", cmName,
+		"-n", namespace, "-o", "json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get configmap %s: %w", cmName, err)
+	}
+	var cm struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(out, &cm); err != nil {
+		return nil, fmt.Errorf("parse seed ConfigMap: %w", err)
+	}
+	seed, err := allowlist.ParseServedJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		return nil, fmt.Errorf("parse allowlist seed: %w", err)
+	}
+	entry, ok := seed.Workloads[entryName]
+	if !ok {
+		return nil, fmt.Errorf("seed has no entry %q", entryName)
+	}
+	var sweep, pause []string
+	for _, c := range entry.Containers {
+		argv, err := exactArgv(c)
+		if err != nil || len(argv) == 0 {
+			continue
+		}
+		switch {
+		case strings.Contains(argv[len(argv)-1], "c8s host sweep"):
+			if sweep != nil {
+				return nil, fmt.Errorf("entry %q pins two host-sweep script shapes", entryName)
+			}
+			sweep = argv
+		case argv[0] != "/bin/sh" || len(argv) == 1 || argv[1] != "-c":
+			if pause != nil {
+				return nil, fmt.Errorf("entry %q pins two non-script shapes", entryName)
+			}
+			pause = argv
+		}
+	}
+	if sweep == nil || pause == nil {
+		return nil, fmt.Errorf("entry %q pins no host-sweep script/pause pair", entryName)
+	}
+	return [][]string{sweep, pause}, nil
+}
+
+// exactArgv renders an allowlist container's pinned OCI argv: command prefix
+// plus exact args. Anything not pinned exact/exact is an error.
+func exactArgv(c allowlist.Container) ([]string, error) {
+	if c.Command.Policy != allowlist.PolicyExact || c.Args.Policy != allowlist.PolicyExact {
+		return nil, fmt.Errorf("not argv-exact")
+	}
+	return append(append([]string{}, c.Command.Argv...), c.Args.Argv...), nil
+}
+
+// seedConfigMapName is the CDS allowlist seed ConfigMap for a release:
+// c8s.cdsName plus the suffix cds.yaml gives it.
+func seedConfigMapName(release string) string {
+	name := release + "-cds"
+	if len(name) > 63 {
+		name = strings.TrimSuffix(name[:63], "-")
+	}
+	return name + "-allowlist-seed"
 }
 
 // sweepImageRef picks the image the sweep DaemonSet runs. On shapes where
@@ -581,12 +696,10 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: n})
 	}
 	return &appsv1.DaemonSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "DaemonSet"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      hostSweepName(release),
-			Namespace: namespace,
-			Labels:    labels,
-		},
+		APIVersion: "apps/v1", Kind: "DaemonSet",
+		Name:      hostSweepName(release),
+		Namespace: namespace,
+		Labels:    labels,
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
@@ -605,8 +718,7 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 						Name:            "sweep",
 						Image:           cfg.SweepImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{"/bin/sh", "-c"},
-						Args:            []string{hostSweepScript},
+						Command:         cfg.SweepArgv,
 						Env: []corev1.EnvVar{
 							{Name: "HOST_CONTAINERD_DIR", Value: cfg.ContainerdConfigDir},
 							{Name: "RKE2_PREP", Value: strconv.FormatBool(cfg.Distro == "rke2")},
@@ -636,9 +748,9 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 						Name:            "pause",
 						Image:           cfg.SweepImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						// busybox sleep has no "infinity"; the pod lives only
-						// until the CLI's rollout-status wait returns anyway.
-						Command: []string{"/bin/sh", "-c", "sleep 2147483647"},
+						// The pod lives only until the CLI's rollout-status
+						// wait returns anyway.
+						Command: cfg.PauseArgv,
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -651,10 +763,8 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 						},
 					}},
 					Volumes: []corev1.Volume{{
-						Name: "host",
-						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{Path: "/"},
-						},
+						Name:     "host",
+						HostPath: &corev1.HostPathVolumeSource{Path: "/"},
 					}},
 				},
 			},

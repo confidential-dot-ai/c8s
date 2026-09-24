@@ -332,7 +332,7 @@ func TestALimiterMetersItsWholeCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < meterableClients; i++ {
+	for i := range meterableClients {
 		rl.allow("client-" + strconv.Itoa(i))
 	}
 	if got := rl.Len(); got != meterableClients {
@@ -365,7 +365,7 @@ func TestEvictionLoopReclaimsQuietCallers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		rl.allow("client-" + strconv.Itoa(i))
 	}
 	if got := rl.Len(); got != 8 {
@@ -375,8 +375,7 @@ func TestEvictionLoopReclaimsQuietCallers(t *testing.T) {
 		t.Fatal("a full map admitted a new caller")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go rl.EvictionLoop(ctx, time.Millisecond, 10*time.Millisecond)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -402,11 +401,11 @@ func TestChurnPastCapacityStaysLimited(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for w := 0; w < waves; w++ {
+	for w := range waves {
 		allowed := 0
-		for i := 0; i < keys; i++ {
+		for i := range keys {
 			key := "attacker-" + strconv.Itoa(i)
-			for j := 0; j < pollsPerKey; j++ {
+			for range pollsPerKey {
 				if rl.allow(key) {
 					allowed++
 				}
@@ -455,11 +454,11 @@ func TestConcurrentAllowNeverExceedsCapacity(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				rl.allow("key-" + strconv.Itoa((g+i)%keys))
 				if n := rl.Len(); n > capacity {
 					t.Errorf("map holds %d entries, over capacity %d", n, capacity)

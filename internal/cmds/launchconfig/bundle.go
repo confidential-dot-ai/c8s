@@ -54,8 +54,8 @@ type BundleOptions struct {
 	WorkloadsPath string
 }
 
-// NewBundle generates the cluster's two launch keys, writes
-// and signs the server document plus one agent document per name, and
+// NewBundle generates the cluster's two launch keys, writes and signs the
+// server document plus one agent document per name, and
 // emits the client policy. Dir must not exist; a failed run removes it so a
 // half-written bundle can never be attached.
 func NewBundle(opts BundleOptions) (err error) {
@@ -133,7 +133,7 @@ func NewBundle(opts BundleOptions) (err error) {
 }
 
 // AddAgent derives an agent document from the bundle's server document
-// (same cluster, image, keys and SAN, without join credentials),
+// (same cluster, image, keys and SAN; the document carries no credentials),
 // signs it with the bundle's agent key and writes <dir>/<name>. It works
 // on a bundle created earlier, so a cluster can grow without regenerating or
 // re-signing anything the server already booted with.
@@ -167,10 +167,10 @@ func AddAgent(dir, name, serverAddress string) (err error) {
 		return err
 	}
 	if serverAddress == "" {
+		if server.Server.Address == "" {
+			return errors.New("--server-address is required: the server document leaves its address to autodetection, and an agent must be told where its server is")
+		}
 		serverAddress = server.Server.Address
-	}
-	if serverAddress == "" {
-		return errors.New("--server-address is required: the server document leaves its address to autodetection, and an agent must be told where its server is")
 	}
 	agent := *server
 	agent.Role = Agent
@@ -200,6 +200,9 @@ func imageFromManifest(path string, vcpus int) (Image, error) {
 			image.RTMRs[idx] = hex.EncodeToString(value[:])
 		}
 	case teetypes.FamilySNP:
+		// An SNP launch digest covers one vCPU count, so a manifest with a
+		// single variant still boots at exactly that count, not at any count.
+		// Omitting --vcpus takes that sole variant; it never means "all".
 		if vcpus == 0 && len(variants) > 1 {
 			return Image{}, fmt.Errorf("--vcpus is required: %s pins %d SNP launch digests, one per vCPU count", path, len(variants))
 		}
@@ -244,17 +247,15 @@ func writeSignedDocument(dir string, doc Document, key *ecdsa.PrivateKey, pub st
 			os.RemoveAll(dir)
 		}
 	}()
-	for _, f := range []struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}{{pubkeyFile, []byte(pub), 0o644}, {documentFile, data, 0o600}, {signatureFile, []byte(signature + "\n"), 0o600}} {
-		// Keep signed launch artifacts private to the operator.
-		if err := writeNew(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
-			return err
-		}
+	if err := writeNew(filepath.Join(dir, pubkeyFile), []byte(pub), 0o644); err != nil {
+		return err
 	}
-	return nil
+	// The document is public policy; keep it operator-only anyway so a
+	// bundle directory never hands out more than its ISO must.
+	if err := writeNew(filepath.Join(dir, documentFile), data, 0o600); err != nil {
+		return err
+	}
+	return writeNew(filepath.Join(dir, signatureFile), []byte(signature+"\n"), 0o600)
 }
 
 func newLaunchKey(path string) (*ecdsa.PrivateKey, string, error) {

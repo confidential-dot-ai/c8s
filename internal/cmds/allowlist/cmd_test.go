@@ -16,17 +16,19 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -152,12 +154,7 @@ func runCmd(args ...string) (string, string, error) {
 }
 
 func contains(methods []string, m string) bool {
-	for _, x := range methods {
-		if x == m {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(methods, m)
 }
 
 // --- pure helpers ---
@@ -373,7 +370,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	const warning = "no --measurements set"
-	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verify: stubVerify}, output: "text"}
+	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verifier: testutil.VerifierStub(stubVerify)}, output: "text"}
 
 	t.Run("unpinned warns", func(t *testing.T) {
 		o := base

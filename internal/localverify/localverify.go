@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/go-sev-guest/verify/trust"
@@ -23,7 +25,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/attestation-go/remote"
-
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -35,6 +36,29 @@ const (
 	kdsMaxRetryDelay = 8 * time.Second
 	kdsMaxFetchTime  = 2 * time.Minute
 )
+
+// kdsGetter builds the network getter behind the VCEK cache; a variable so a
+// test can stand in a fake KDS and prove what does and does not reach it.
+var kdsGetter = func() trust.HTTPSGetter {
+	return snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)
+}
+
+// kdsCacheDirEnv overrides the on-disk VCEK cache location; an empty value
+// disables the cache.
+const kdsCacheDirEnv = "C8S_KDS_CACHE_DIR"
+
+// defaultKDSCacheDir resolves the cache directory: the env override (empty
+// disables), else the user cache dir, else none.
+func defaultKDSCacheDir() string {
+	if v, ok := os.LookupEnv(kdsCacheDirEnv); ok {
+		return v
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "c8s", "kds")
+}
 
 // Params is the policy a Verify call enforces on the evidence.
 type Params struct {
@@ -79,7 +103,7 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 	// the Getter lets the snp and gcp-snp arms fetch it from AMD KDS, bounded
 	// by ctx. Nothing else here reaches the network.
 	res, err := teeverify.VerifyEnvelope(ctx, envelope, p.VerifyParams, teeverify.Options{
-		SNP: snp.Options{Getter: snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)},
+		SNP: snp.Options{Getter: snp.NewCachingKDSGetter(defaultKDSCacheDir(), kdsGetter())},
 	})
 	if err != nil {
 		var re *trust.AttestationRecreationErr

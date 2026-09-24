@@ -78,7 +78,7 @@ spec:
             {{- else }}
 {{ fail (printf "attestationApi.cvmMode must be one of bare-metal, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
-          # The API's health signal is the attest-proxy's exec probe: the API
+          # The API's health signal is the attest-proxy's HTTP probe: the API
           # binds pod loopback, which kubelet cannot dial.
           volumeMounts:
             - name: config
@@ -119,6 +119,10 @@ spec:
             - attest-proxy
             - --socket={{ include "c8s.attestationApiSocket" . }}
             - --upstream=http://127.0.0.1:{{ .Values.attestationApi.port }}
+            - --health-addr=:{{ .Values.attestationApi.proxy.healthPort }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.attestationApi.proxy.healthPort }}
           # uid 0 so the socket is root-owned (callers reject a socket owned
           # by anyone but root or themselves); runAsGroup is the socket's
           # group so the chgrp needs no CAP_CHOWN.
@@ -131,15 +135,22 @@ spec:
               drop: [ALL]
             seccompProfile:
               type: RuntimeDefault
+          # HTTP, not exec: a locked node image denies every runc exec, so an
+          # exec probe can never pass there (c8s internal/cmds/c8srunc). The
+          # handler runs the same check the `attest-proxy healthcheck`
+          # subcommand does — a /health round-trip over the proxy's own socket —
+          # so one probe still covers socket, proxy and upstream.
           readinessProbe:
-            exec:
-              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
+            httpGet:
+              path: /healthz
+              port: health
             initialDelaySeconds: 2
             # Above the healthcheck's internal 3s budget (kubelet default is 1s).
             timeoutSeconds: 5
           livenessProbe:
-            exec:
-              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
+            httpGet:
+              path: /healthz
+              port: health
             periodSeconds: 30
             timeoutSeconds: 5
           volumeMounts:

@@ -1,4 +1,4 @@
-{{- if and .Values.ratlsMesh.enabled (not .Values.node.bakedServices) }}
+{{- if .Values.ratlsMesh.enabled }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

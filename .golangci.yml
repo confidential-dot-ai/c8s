@@ -20,3 +20,15 @@ linters:
         - (net/http.ResponseWriter).Write
         - (*encoding/json.Encoder).Encode
         - io.Copy
+
+formatters:
+  enable:
+    - gci
+  settings:
+    gci:
+      # Standard library, then third-party, then our own modules
+      # (attestation-go and c8s share the last group).
+      sections:
+        - standard
+        - default
+        - prefix(github.com/confidential-dot-ai)

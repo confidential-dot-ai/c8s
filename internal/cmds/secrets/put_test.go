@@ -21,6 +21,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
@@ -106,9 +107,9 @@ func writeOperatorKey(t *testing.T) string {
 // run drives the command tree the way a shell would, with stdin supplied.
 func run(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	cmd := newCmd(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+	cmd := newCmd(testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return nil, nil
-	})
+	}))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

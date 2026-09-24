@@ -80,7 +80,7 @@ var (
 //
 // One report answers every question this package asks about the guest: the
 // operator-key binding (LoadMeasuredOperatorKey) and its own launch
-// image identity. LoadMeasuredOperatorKeyAndOwnMeasurement answers both
+// image identity. LoadMeasuredIdentity answers both
 // from one report so the guest attests once.
 func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetypes.VerificationResult, error) {
 	client := remote.NewClient(attestationAPIURL)
@@ -146,42 +146,40 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 	return pub, nil
 }
 
-// LoadMeasuredOperatorKeyAndOwnMeasurement checks the operator key and reads
-// the guest image identity from one verified self-report.
-//
-// The own measurement is always resolved, operator key present or not — a
-// non-operator boot (pubErr wrapping ErrNoOperatorKey) still needs it for
-// cds/ratlsMesh measurements, so pub/pubErr come back alongside
-// measurement/rtmrs rather than short-circuiting the whole call. The caller
-// (launchconfig.Stage) distinguishes "no key staged" from every other
-// pubErr via errors.Is(pubErr, ErrNoOperatorKey). err is set only when the
-// self-report itself, or the measurement read off it, fails.
-func LoadMeasuredOperatorKeyAndOwnMeasurement(ctx context.Context, platform, attestationAPIURL string) (pub []byte, pubErr error, measurement []byte, rtmrs map[int][]byte, err error) {
-	pub, pubErr = readOperatorPubkey()
+// MeasuredIdentity separates the verified guest image from the operator-key
+// binding result. Non-operator boots still need Image to pin peer nodes, so
+// a missing key must not discard a verified image. OperatorKeyErr distinguishes
+// that absence (ErrNoOperatorKey) from a read or binding failure; callers must
+// reject other key errors. OperatorKey is authorized only when OperatorKeyErr
+// is nil.
+type MeasuredIdentity struct {
+	OperatorKey    []byte
+	OperatorKeyErr error
+	Image          runtimemeasure.ImageIdentity
+}
+
+// LoadMeasuredIdentity checks the operator key and reads the guest image
+// identity from one verified self-report. Image is always resolved, even if the
+// key is missing or its binding fails; OperatorKeyErr records that failure.
+// The returned error is reserved for self-report, image, or platform failures.
+func LoadMeasuredIdentity(ctx context.Context, platform, attestationAPIURL string) (MeasuredIdentity, error) {
+	pub, pubErr := readOperatorPubkey()
 	report, err := verifiedSelfReport(ctx, attestationAPIURL)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return MeasuredIdentity{}, err
 	}
 	if pubErr == nil {
-		if verr := runtimemeasure.VerifyBinding(report, pub, nil); verr != nil {
-			pub, pubErr = nil, verr
-		}
+		pubErr = runtimemeasure.VerifyBinding(report, pub, nil)
+	}
+	if pubErr != nil {
+		pub = nil
 	}
 	identity, err := runtimemeasure.IdentityFromResult(report)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return MeasuredIdentity{}, err
 	}
 	if string(identity.Family()) != platform {
-		return nil, nil, nil, nil, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, report.Platform)
+		return MeasuredIdentity{}, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, report.Platform)
 	}
-	// Adapt the shared identity to the signed launch document's fields.
-	observed := identity.LaunchDigests()[0].Digest
-	measurement = observed[:]
-	for index, value := range identity.RTMRs() {
-		if rtmrs == nil {
-			rtmrs = make(map[int][]byte)
-		}
-		rtmrs[index] = value[:]
-	}
-	return pub, pubErr, measurement, rtmrs, nil
+	return MeasuredIdentity{OperatorKey: pub, OperatorKeyErr: pubErr, Image: identity}, nil
 }

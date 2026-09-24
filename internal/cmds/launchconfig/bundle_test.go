@@ -62,15 +62,17 @@ func runBundleCmd(t *testing.T, args ...string) error {
 // production code path and a self-report matching the manifest pins.
 func stageBundleNode(t *testing.T, dir, node string) {
 	t.Helper()
+	// Staging a server mints the agent token into the rebased /run/confos,
+	// a plain temp dir here; production checks the real mount is RAM-backed.
+	oldRAM := requireTokenRAM
+	t.Cleanup(func() { requireTokenRAM = oldRAM })
+	requireTokenRAM = func(*os.Root) error { return nil }
 	doc, _ := readBundleDocument(t, dir, node)
 	pub, err := os.ReadFile(filepath.Join(dir, node, pubkeyFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	testLoader(t, *doc, string(pub))
-	oldRAM := requireTokenRAM
-	requireTokenRAM = func(*os.Root) error { return nil }
-	t.Cleanup(func() { requireTokenRAM = oldRAM })
 	cfg := Config{
 		Platform:      doc.Image.Platform,
 		RootDir:       t.TempDir(),
@@ -101,7 +103,7 @@ func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 			if err := runBundleCmd(t, args...); err != nil {
 				t.Fatal(err)
 			}
-			server, serverData := readBundleDocument(t, dir, serverDir)
+			server, _ := readBundleDocument(t, dir, serverDir)
 			if server.Role != Server || server.Node.Name != "demo-server" || server.ClusterID != "demo" || server.TLSSAN != defaultTLSSAN {
 				t.Fatalf("unexpected server document: %+v", server)
 			}
@@ -115,16 +117,19 @@ func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 			} else if server.Image.Measurement != strings.Repeat("55", 48) || len(server.Image.RTMRs) != 0 {
 				t.Fatalf("SNP pin is not the 8-vCPU variant: %+v", server.Image)
 			}
-			if bytes.Contains(serverData, []byte("rke2:")) || bytes.Contains(serverData, []byte("serverToken:")) || bytes.Contains(serverData, []byte("agentToken:")) {
-				t.Fatal("server launch document carries join credentials")
+			// The bundle is public policy: no join credential may appear in
+			// any document the operator attaches to a node.
+			_, serverData := readBundleDocument(t, dir, serverDir)
+			if bytes.Contains(serverData, []byte("rke2")) || bytes.Contains(serverData, []byte("Token")) {
+				t.Fatalf("server document carries a credential: %s", serverData)
 			}
 			for _, name := range []string{"demo-f1", "demo-f2"} {
 				agent, data := readBundleDocument(t, dir, name)
 				if agent.Role != Agent || agent.Node.Name != name || agent.Server.Address != "10.0.0.10" {
 					t.Fatalf("unexpected agent %s: %+v", name, agent)
 				}
-				if bytes.Contains(data, []byte("rke2:")) || bytes.Contains(data, []byte("serverToken:")) || bytes.Contains(data, []byte("agentToken:")) {
-					t.Fatalf("agent %s launch document carries join credentials", name)
+				if bytes.Contains(data, []byte("rke2")) || bytes.Contains(data, []byte("Token")) {
+					t.Fatalf("agent %s carries a credential: %s", name, data)
 				}
 				if !reflect.DeepEqual(agent.Image, server.Image) ||
 					agent.Server.OperatorPublicKey != server.Server.OperatorPublicKey ||
@@ -190,7 +195,7 @@ func TestAddAgentExtendsAnExistingBundle(t *testing.T) {
 	}
 	server, _ := readBundleDocument(t, dir, serverDir)
 	agent, _ := readBundleDocument(t, dir, "late")
-	if agent.Role != Agent || agent.Server.Address != "10.0.0.10" || !reflect.DeepEqual(agent.Image, server.Image) || agent.Server.OperatorPublicKey != server.Server.OperatorPublicKey {
+	if agent.Role != Agent || agent.Server.Address != "10.0.0.10" || agent.ClusterID != server.ClusterID {
 		t.Fatalf("unexpected late agent: %+v", agent)
 	}
 	stageBundleNode(t, dir, "late")

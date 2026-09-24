@@ -64,6 +64,9 @@ case "$1 $2" in
     rm -f /run/confos/role-server /run/confos/role-agent
     case "$(cat "$config")" in
         server)
+            # Real staging writes the agent enrollment policy only when the
+            # signed document authorizes agents; the fixture mirrors that so
+            # the release unit's condition is exercised both ways.
             mkdir -p /run/confos/launch
             if [[ ! -e "$C8S_ROLE_FIXTURE/no-agents" ]]; then
                 printf '%s\n' '{"test":"authorized-agents"}' > /run/confos/launch/agents.json
@@ -79,17 +82,6 @@ case "$1 $2" in
     [[ -f /run/confos/role-server || -f /run/confos/role-agent ]]
     [[ ! -e "$C8S_ROLE_FIXTURE/prepare-fails" ]]
     : > "$C8S_ROLE_FIXTURE/prepared"
-    ;;
-'node-services run')
-    [[ $# == 3 && $3 == join && -f /run/confos/role-agent ]]
-    attempts=0
-    if [[ -f /run/confos/test-join-attempts ]]; then attempts=$(cat /run/confos/test-join-attempts); fi
-    attempts=$((attempts + 1))
-    printf '%s\n' "$attempts" > /run/confos/test-join-attempts
-    [[ ! -e "$C8S_ROLE_FIXTURE/join-fails" ]] || exit 33
-    [[ ! -e "$C8S_ROLE_FIXTURE/join-fails-once" || $attempts -gt 1 ]] || exit 34
-    umask 077
-    printf '%s\n' test-enrolled-agent-credential > /run/confos/rke2-agent-token
     ;;
 *) exit 32 ;;
 esac

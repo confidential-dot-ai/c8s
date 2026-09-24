@@ -24,7 +24,7 @@ import (
 // pod builds a test pod. ownerKind == "" means a bare (unowned) pod.
 func pod(name, ns, ownerKind string, ann map[string]string) *corev1.Pod {
 	p := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Annotations: ann},
+		Name: name, Namespace: ns, Annotations: ann,
 	}
 	if ownerKind != "" {
 		controller := true

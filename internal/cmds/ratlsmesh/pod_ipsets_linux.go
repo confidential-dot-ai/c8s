@@ -10,7 +10,9 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -109,9 +112,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
-	for family, ip := range discovered {
-		nodeIPsByFamily[family] = ip
-	}
+	maps.Copy(nodeIPsByFamily, discovered)
 	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
 		return err
 	}
@@ -145,6 +146,10 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err := resetReadyFile(cfg.readyFile); err != nil {
 		return err
 	}
+	ready, err := serveReadiness(ctx, cfg.readyAddr, logger)
+	if err != nil {
+		return err
+	}
 	clientset, err := newKubeClientset(cfg.kubeconfig)
 	if err != nil {
 		return err
@@ -154,7 +159,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 	syncCh := make(chan struct{}, 1)
-	notifySync := func(interface{}) {
+	notifySync := func(any) {
 		select {
 		case syncCh <- struct{}{}:
 		default:
@@ -162,7 +167,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	}
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    notifySync,
-		UpdateFunc: func(_, obj interface{}) { notifySync(obj) },
+		UpdateFunc: func(_, obj any) { notifySync(obj) },
 		DeleteFunc: notifySync,
 	}); err != nil {
 		return fmt.Errorf("iptables sync: add pod event handler: %w", err)
@@ -194,6 +199,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 			return fmt.Errorf("write ready file: %w", err)
 		}
 	}
+	ready.Store(true)
 	logger.Info("iptables sync ready",
 		"resync_period", cfg.resyncPeriod.String(),
 		"watchdog_period", cfg.watchdogPeriod.String())
@@ -278,6 +284,37 @@ func resetReadyFile(path string) error {
 	return nil
 }
 
+// serveReadiness starts the startup probe's endpoint and returns the flag the
+// caller sets once interception is installed. The main proxy container is
+// gated on this probe (native sidecars start in order), so until it flips no
+// pod traffic can leave the node unintercepted. Empty addr disables the
+// endpoint and returns a flag nobody reads.
+//
+// It binds before the informer work so the probe answers 503 while the sync is
+// still coming up, rather than failing to connect.
+func readinessHandler(ready *atomic.Bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "the initial ipset and iptables sync has not completed", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, "ready")
+	})
+	return mux
+}
+
+func serveReadiness(ctx context.Context, addr string, logger *slog.Logger) (*atomic.Bool, error) {
+	var ready atomic.Bool
+	if addr == "" {
+		return &ready, nil
+	}
+	if _, err := cmdsutil.ServeInBackground(ctx, addr, readinessHandler(&ready), logger); err != nil {
+		return nil, fmt.Errorf("--ready-addr: %w", err)
+	}
+	return &ready, nil
+}
+
 func runJumpWatchdog(ctx context.Context, logger *slog.Logger, jumps []iptablesRule, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -359,7 +396,7 @@ func (m podIPSetMembers) exceeds(maxElem int) bool {
 		len(m.cwIPv6) > maxElem
 }
 
-func collectPodIPSetMembers(objs []interface{}, nodeIPs []string, excludedSourceNamespaces map[string]struct{}) podIPSetMembers {
+func collectPodIPSetMembers(objs []any, nodeIPs []string, excludedSourceNamespaces map[string]struct{}) podIPSetMembers {
 	ourNodeIPs := make(map[string]struct{}, len(nodeIPs))
 	for _, ip := range nodeIPs {
 		if canon := normalizeIP(ip); canon != "" {
@@ -819,7 +856,7 @@ func readIPSetMaxElem(name string) (int, bool, error) {
 // vary (e.g. comment, counters, skbinfo), so scan rather than hardcoding
 // positions.
 func parseIPSetMaxElemHeader(out string) (int, error) {
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "Header:") {
 			continue

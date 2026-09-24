@@ -7,12 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
-	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 )
 
 func mutateWithVolumes(t *testing.T, pod *corev1.Pod, specs []string, dir string) {
@@ -128,8 +127,8 @@ func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 	pod := podWithApp()
 	name := volume.KubeVolumeName("weights")
 	pod.Spec.Volumes = []corev1.Volume{{
-		Name:         name,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		Name:     name,
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
 	}}
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
 		Name:      name,
@@ -177,10 +176,8 @@ func TestReservedVolumePrefixMustBeMemoryBacked(t *testing.T) {
 	} {
 		pod := podWithApp()
 		pod.Spec.Volumes = []corev1.Volume{{
-			Name: name,
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/exfil"},
-			},
+			Name:     name,
+			HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/exfil"},
 		}}
 		if err := rejectReservedVolumeVolume(pod); err == nil {
 			t.Errorf("%s: a hostPath under the reserved prefix was accepted", name)
@@ -204,10 +201,8 @@ func TestReservedVolumePrefixMustBeMemoryBacked(t *testing.T) {
 func TestEphemeralContainerMayNotMountAnOpenedVolume(t *testing.T) {
 	pod := podWithApp()
 	pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
-			Name:         "debug",
-			VolumeMounts: []corev1.VolumeMount{{Name: volume.KubeVolumeName("weights")}},
-		},
+		Name:         "debug",
+		VolumeMounts: []corev1.VolumeMount{{Name: volume.KubeVolumeName("weights")}},
 	}}
 	if err := rejectEphemeralReservedMounts(pod); err == nil {
 		t.Fatal("an ephemeral container mounted an opened volume")
@@ -217,7 +212,7 @@ func TestEphemeralContainerMayNotMountAnOpenedVolume(t *testing.T) {
 func TestEphemeralContainerMayNotTakeTheFetcherName(t *testing.T) {
 	pod := podWithApp()
 	pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-		EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: reservedVolumeContainerName},
+		Name: reservedVolumeContainerName,
 	}}
 	if err := rejectEphemeralReservedMounts(pod); err == nil {
 		t.Fatal("an ephemeral container took the reserved fetcher name")
@@ -335,10 +330,10 @@ func handleVolumesPod(t *testing.T, cfg Config) admission.Response {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload: "api",
 			AnnotationVolumes:  "weights=/tenant-a/volumes/weights",
-		}},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
@@ -347,10 +342,8 @@ func handleVolumesPod(t *testing.T, cfg Config) admission.Response {
 	}
 	m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: cfg}
 	return m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Namespace: "tenant",
-			Object:    runtime.RawExtension{Raw: raw},
-		},
+		Namespace: "tenant",
+		Object:    runtime.RawExtension{Raw: raw},
 	})
 }
 

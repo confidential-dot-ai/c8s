@@ -128,6 +128,12 @@ test-node-guest-image-psa-ready:
 test-node-guest-image-role-systemd:
 	./node-guest-image/tests/rke2-role-systemd-test.sh
 
+# Verify measured OCI archives offline with a real ORAS multi-platform copy.
+# Needs ORAS, jq, Python 3 and GNU tar.
+.PHONY: test-node-guest-image-airgap
+test-node-guest-image-airgap:
+	bash node-guest-image/tests/airgap-images-test.sh
+
 # Needs root (private mount namespace) and a ./confos checkout.
 test-node-guest-image-cloud-init:
 	./node-guest-image/tests/cloud-init-disabled.sh

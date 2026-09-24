@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
@@ -261,25 +260,15 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 
 // cdsPins is shared by outbound pulls and the CDS-only inventory endpoint.
 func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
-	if cfg.CDSMeasurementsConfig != "" {
-		if len(cfg.CDSMeasurements) != 0 || len(cfg.CDSRTMRs) != 0 {
-			return ratls.Pins{}, fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
-		}
-		set, err := refvalues.Load(cfg.CDSMeasurementsConfig)
-		if err != nil {
-			return ratls.Pins{}, err
-		}
-		return ratls.Pins(set.Policy()), nil
+	if err := cfg.validatePolicyInputs(); err != nil {
+		return ratls.Pins{}, err
 	}
-	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	policy, err := (cmdsutil.ImagePolicySource{File: cfg.CDSMeasurementsConfig}).Load(
+		cmdsutil.MeasurementPins{Measurements: cfg.CDSMeasurements, Registers: cfg.CDSRTMRs, Prefix: "cds-"})
 	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("parse CDS measurements: %w", err)
+		return ratls.Pins{}, fmt.Errorf("allowlist.pull: %w", err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(cfg.CDSRTMRs)
-	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("parse CDS RTMR pins: %w", err)
-	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	return ratls.Pins(policy), nil
 }
 
 type pullArgs struct {

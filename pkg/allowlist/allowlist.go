@@ -71,8 +71,8 @@ type Container struct {
 	Image   string       `json:"image,omitempty" yaml:"image,omitempty"`
 	Command ArgvPolicy   `json:"command" yaml:"command"`
 	Args    ArgvPolicy   `json:"args" yaml:"args"`
-	Mounts  MountPolicy  `json:"mounts,omitempty" yaml:"mounts,omitempty"`
-	Env     EnvPolicy    `json:"env,omitempty" yaml:"env,omitempty"`
+	Mounts  MountPolicy  `json:"mounts" yaml:"mounts,omitempty"`
+	Env     EnvPolicy    `json:"env" yaml:"env,omitempty"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -85,24 +85,44 @@ type ArgvPolicy struct {
 	Argv   []string `json:"argv,omitempty" yaml:"argv,omitempty"`
 }
 
-// MountPolicy governs where the host may bind content into the container.
-//
-// It constrains BIND mounts only — a mount whose source is an absolute guest
-// path. The rest of a container's mount table names filesystem types (proc,
-// sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing in, so pinning it
-// would make an operator restate the OCI base set to say nothing.
-//
-// Exact requires every bind destination to appear in Destinations, which is the
-// set an operator recognises: it is what the pod spec's volumeMounts declare,
-// plus the handful the kubelet always adds (/etc/hosts, /etc/hostname,
-// /etc/resolv.conf, /dev/termination-log, /dev/shm, the serviceaccount token).
-// Any leaves them unconstrained, and is what an absent policy means — unlike
-// argv, a Deny default would refuse every real pod, since the base set is never
-// empty.
+// MountPolicy governs bind mounts present at final OCI launch. An absent policy
+// is Deny: only verified platform mounts are admitted. Exact requires the
+// observed non-platform mount set to equal Rules. Any explicitly leaves mounts
+// unconstrained.
 type MountPolicy struct {
-	Policy       string   `json:"policy" yaml:"policy"`
-	Destinations []string `json:"destinations,omitempty" yaml:"destinations,omitempty"`
+	Policy string      `json:"policy" yaml:"policy"`
+	Rules  []MountRule `json:"rules,omitempty" yaml:"rules,omitempty"`
 }
+
+// MountRule pins one non-platform mount by destination and source kind.
+type MountRule struct {
+	Destination string     `json:"destination" yaml:"destination"`
+	Kind        MountClass `json:"kind" yaml:"kind"`
+	Source      string     `json:"source,omitempty" yaml:"source,omitempty"`
+	ReadOnly    bool       `json:"readOnly,omitempty" yaml:"readOnly,omitempty"`
+}
+
+// MountClass identifies who controls the content behind a bind mount.
+type MountClass string
+
+const (
+	MountPlatform MountClass = "platform"
+	MountEmptyDir MountClass = "emptyDir"
+	MountData     MountClass = "data"
+	MountHost     MountClass = "host"
+)
+
+// MountStorage records the storage guarantee established by the node.
+type MountStorage string
+
+const (
+	MountMemory    MountStorage = "memory"
+	MountEncrypted MountStorage = "encrypted"
+	MountUnknown   MountStorage = "unknown"
+)
+
+// DataMountPrefix is reserved for operator-supplied data.
+const DataMountPrefix = "/mnt/c8s-data/"
 
 // EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
@@ -193,8 +213,7 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 }
 
 // errGrantUnpinned refuses a secrets grant on an entry that leaves any
-// container's argv to the host: the value would be released to whatever
-// command line the host chose.
+// container's argv to the host.
 var errGrantUnpinned = fmt.Errorf("a secrets grant requires every container's command and args policy to be exact or deny")
 
 // Digests returns every container digest in the workload (init and main), for
@@ -213,7 +232,19 @@ func (w Workload) Digests() []types.Digest {
 // AnyArgv reports whether the container is admitted whatever it runs: command
 // and args both any.
 func (c Container) AnyArgv() bool {
-	return c.Command.Policy == PolicyAny && c.Args.Policy == PolicyAny
+	return (processConstraint{command: &c.Command, args: &c.Args}).isUnconstrained()
+}
+
+// IsUnconstrained reports whether process, mounts and environment are all left
+// to the host. Absent mounts normalize to Deny; absent environment normalizes
+// to Any.
+func (c Container) IsUnconstrained() bool {
+	for _, constraint := range c.constraints() {
+		if !constraint.isUnconstrained() {
+			return false
+		}
+	}
+	return true
 }
 
 // ArgvPinned reports whether every container's command and args policy is
@@ -221,8 +252,23 @@ func (c Container) AnyArgv() bool {
 // secrets grant requires it (docs/secrets.md).
 func (w Workload) ArgvPinned() bool {
 	for _, c := range w.containers() {
-		if c.Command.Policy == PolicyAny || c.Args.Policy == PolicyAny {
+		if !(processConstraint{command: &c.Command, args: &c.Args}).hostIndependent() {
 			return false
+		}
+	}
+	return true
+}
+
+// HostIndependent reports whether every runtime field that can change what a
+// container executes or reads is constrained independently of the host.
+func (w Workload) HostIndependent() bool {
+	containers := w.containers()
+	for i := range containers {
+		c := containers[i]
+		for _, constraint := range c.constraints() {
+			if !constraint.hostIndependent() {
+				return false
+			}
 		}
 	}
 	return true
@@ -264,6 +310,7 @@ func DigestEntry(digest types.Digest, image string) Workload {
 			Image:   image,
 			Command: ArgvPolicy{Policy: PolicyAny},
 			Args:    ArgvPolicy{Policy: PolicyAny},
+			Mounts:  MountPolicy{Policy: PolicyAny},
 			Env:     EnvPolicy{Policy: PolicyAny},
 		}},
 	}
@@ -358,48 +405,62 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if c.Digest.String() == "" {
 			return fmt.Errorf("workload %q %s[%d]: digest is required", workload, field, i)
 		}
-		if err := normalizeArgv(&c.Command); err != nil {
-			return fmt.Errorf("workload %q %s %s command: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeArgv(&c.Args); err != nil {
-			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeMounts(&c.Mounts); err != nil {
-			return fmt.Errorf("workload %q %s %s mounts: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeEnv(&c.Env); err != nil {
-			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
+		for _, constraint := range c.constraints() {
+			if policyField, err := constraint.normalize(); err != nil {
+				return fmt.Errorf("workload %q %s %s %s: %w", workload, field, c.Digest, policyField, err)
+			}
 		}
 	}
 	return nil
 }
 
-// normalizeMounts validates a mount policy. An absent policy canonicalizes to
-// Any: every container has a mount table it did not ask for (the OCI base set,
-// /etc/hosts, the serviceaccount token), so Deny would refuse every real pod and
-// an operator adopting this field would be opting into an outage.
+// normalizeMounts validates and canonicalizes a mount policy. An absent policy
+// becomes Deny; verified platform mounts are part of that policy's baseline.
 func normalizeMounts(p *MountPolicy) error {
 	switch p.Policy {
-	case PolicyAny, "":
-		if len(p.Destinations) != 0 {
-			return fmt.Errorf("any policy takes no destinations")
+	case PolicyAny, PolicyDeny, "":
+		if len(p.Rules) != 0 {
+			return fmt.Errorf("%s policy takes no rules", p.Policy)
 		}
-		p.Policy = PolicyAny
-		p.Destinations = nil
+		if p.Policy == "" {
+			p.Policy = PolicyDeny
+		}
+		p.Rules = nil
 	case PolicyExact:
-		if len(p.Destinations) == 0 {
-			return fmt.Errorf("exact policy requires at least one destination")
-		}
-		for _, d := range p.Destinations {
-			if !path.IsAbs(d) {
-				return fmt.Errorf("destination %q is not an absolute path", d)
-			}
-		}
-		p.Destinations = sortedUnique(p.Destinations)
+		return normalizeMountRules(p.Rules)
 	default:
-		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+		return fmt.Errorf("unknown mount policy %q (want deny, any, or exact)", p.Policy)
 	}
 	return nil
+}
+
+func normalizeMountRules(rules []MountRule) error {
+	if len(rules) == 0 {
+		return fmt.Errorf("exact policy requires at least one rule")
+	}
+	seen := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		if !path.IsAbs(r.Destination) || path.Clean(r.Destination) != r.Destination {
+			return fmt.Errorf("destination %q is not a clean absolute path", r.Destination)
+		}
+		if seen[r.Destination] {
+			return fmt.Errorf("duplicate mount destination %q", r.Destination)
+		}
+		seen[r.Destination] = true
+		if err := validateMountRuleKind(r); err != nil {
+			return err
+		}
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Destination < rules[j].Destination })
+	return nil
+}
+
+func validateMountRuleKind(r MountRule) error {
+	behavior := r.behavior()
+	if behavior == nil {
+		return fmt.Errorf("mount destination %q has unsupported kind %q", r.Destination, r.Kind)
+	}
+	return behavior.validate()
 }
 
 func normalizeEnv(p *EnvPolicy) error {
@@ -428,22 +489,6 @@ func normalizeEnv(p *EnvPolicy) error {
 		return fmt.Errorf("unknown env policy %q (want deny, any, or exact)", p.Policy)
 	}
 	return nil
-}
-
-// sortedUnique makes a list a function of its content, so Canonical does not
-// churn on the order an operator happened to write.
-func sortedUnique(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // normalizeArgv validates an argv policy and canonicalizes an absent policy to

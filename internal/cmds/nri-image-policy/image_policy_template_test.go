@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // The node image's baked boot config is the plugin's other config schema
@@ -21,16 +23,7 @@ func renderNodeImagePolicy(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read node-image policy template: %v", err)
 	}
-	digest := func(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
-	repl := map[string]string{
-		"@OPERATOR_DIGEST@": digest('a'),
-		"@OPERATOR_IMAGE@":  "ghcr.io/confidential-dot-ai/c8s-operator@" + digest('a'),
-		"@PLATFORM@":        "snp",
-	}
-	out := string(body)
-	for k, v := range repl {
-		out = strings.ReplaceAll(out, k, v)
-	}
+	out := strings.ReplaceAll(string(body), "@PLATFORM@", "snp")
 	if ph := regexp.MustCompile(`@[A-Z_]+@`).FindString(out); ph != "" {
 		t.Fatalf("unsubstituted placeholder %s left in rendered template", ph)
 	}
@@ -50,6 +43,15 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("the rendered node-image boot config does not load: %v", err)
+	}
+
+	// The baked config is the only place the boot gate is armed, and
+	// its marker has to be boot-scoped or every restart reads as a first boot.
+	if !cfg.Policy.FatalExisting {
+		t.Error("the baked config must set policy.fatal_existing: a container predating the plugin means admission was not in place")
+	}
+	if !strings.HasPrefix(cfg.Policy.BootMarkerPath, "/run/") {
+		t.Errorf("policy.boot_marker_path = %q, want a path under /run (tmpfs, cleared by a reboot)", cfg.Policy.BootMarkerPath)
 	}
 
 	// The full RKE2 system set: every digest systemfloor derives from the
@@ -101,10 +103,11 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 		}
 	}
 
-	// The base allowlist is the generated system set plus the rendered operator token.
+	// The template contains the generated system set. Boot preparation adds
+	// the separately rendered chart component seed before containerd starts.
 	// The exact count catches an entry a regen adds or drops.
-	if want := len(systemImages) + 1; len(cfg.Allowlist.Base.Workloads) != want {
-		t.Errorf("baked base allowlist has %d entries, want %d (%d system images + operator)",
+	if want := len(systemImages); len(cfg.Allowlist.Base.Workloads) != want {
+		t.Errorf("baked base allowlist has %d entries, want %d (%d system images)",
 			len(cfg.Allowlist.Base.Workloads), want, len(systemImages))
 	}
 	for digest := range baseEntries {
@@ -113,10 +116,12 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 		}
 	}
 
-	// Every base entry must be a digest the store admits under any argv.
+	// System images must remain admitted with their host mounts at final admission.
 	store := newPolicyStore(cfg.Allowlist.Base)
 	for d := range baseEntries {
-		if !store.baseAdmits(d, nil) {
+		if !store.baseAdmits(allowlist.RunningContainer{Digest: d, Mounts: []allowlist.ObservedMount{
+			{Destination: "/host", Class: allowlist.MountHost, Storage: allowlist.MountUnknown},
+		}}, launchFinal) {
 			t.Errorf("base entry %q is not admitted by digest alone", d)
 		}
 	}

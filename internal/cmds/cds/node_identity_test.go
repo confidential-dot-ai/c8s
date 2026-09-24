@@ -2,13 +2,14 @@ package cds
 
 import (
 	"encoding/hex"
-	"github.com/confidential-dot-ai/attestation-go/remote"
 	"net/http"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
 func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
@@ -40,8 +41,10 @@ func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
 }
 
 func TestCDSConfigPreservesNodeKeys(t *testing.T) {
-	cfg := config{measurementsConfig: "../../../internal/testdata/node-identities.json", ratlsPlatform: "tdx"}
-	got, err := resolveMeasurementsConfig(&cfg)
+	got, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
+		Source:   cmdsutil.ImagePolicySource{File: "../../../internal/testdata/node-identities.json"},
+		Platform: "tdx",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

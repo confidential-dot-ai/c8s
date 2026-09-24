@@ -1,0 +1,262 @@
+package cmdsutil
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/spf13/pflag"
+)
+
+const identityPolicyFile = "../../../internal/testdata/node-identities.json"
+
+func TestImagePolicySourceKeepsCompleteIdentities(t *testing.T) {
+	doc, err := os.ReadFile(identityPolicyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous any
+	for _, source := range []ImagePolicySource{{File: identityPolicyFile}, {JSON: string(doc)}} {
+		policy, err := source.Load(MeasurementPins{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.Measurements) != 0 || len(policy.Registers) != 0 || len(policy.Images) != 2 {
+			t.Fatalf("complete identities were flattened: %+v", policy)
+		}
+		for _, pin := range policy.Images {
+			if len(pin.Digest) != 48 || len(pin.Registers[1]) != 48 || len(pin.Registers[2]) != 48 || len(pin.Anchor) == 0 {
+				t.Fatalf("incomplete image tuple: %+v", pin)
+			}
+		}
+		if bytes.Equal(policy.Images[0].Anchor, policy.Images[1].Anchor) {
+			t.Fatal("server and agent keys collapsed into one identity")
+		}
+		if previous != nil && !reflect.DeepEqual(previous, policy) {
+			t.Fatal("file and inline JSON formats produced different policies")
+		}
+		previous = policy
+	}
+}
+
+func TestImagePolicySourceRejectsConflictingInputsBeforeReading(t *testing.T) {
+	for _, source := range []ImagePolicySource{{File: "missing"}, {JSON: "invalid"}} {
+		for _, pins := range []MeasurementPins{
+			{Measurements: []string{"invalid"}},
+			{MeasurementsFile: "missing"},
+			{Registers: []string{"invalid"}},
+			{Measurements: []string{"invalid"}, Prefix: "cds-"},
+			{Registers: []string{"invalid"}, Prefix: "cds-"},
+		} {
+			_, err := source.Load(pins)
+			if err == nil || !strings.Contains(err.Error(), "cannot be combined") || errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("source %+v with %+v: expected usage error before I/O, got %v", source, pins, err)
+			}
+		}
+	}
+	_, err := (ImagePolicySource{File: "missing", JSON: "invalid"}).LoadValues(MeasurementPins{})
+	if err == nil || !strings.Contains(err.Error(), "--image-policy-file cannot be combined with --image-policy-json") {
+		t.Fatalf("file plus inline: %v", err)
+	}
+}
+
+func TestImagePolicySourceErrorsDoNotFallBack(t *testing.T) {
+	_, err := (ImagePolicySource{File: filepath.Join(t.TempDir(), "missing")}).Load(MeasurementPins{})
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "--image-policy-file") {
+		t.Fatalf("missing policy lost its path error: %v", err)
+	}
+	for _, inline := range []string{"{}", "not JSON", identityPolicyFile, strings.Repeat("ab", 48)} {
+		if _, err := (ImagePolicySource{JSON: inline}).Load(MeasurementPins{}); err == nil || !strings.Contains(err.Error(), "--image-policy-json") {
+			t.Fatalf("invalid inline policy accepted or mislabeled: %q: %v", inline, err)
+		}
+	}
+	digestFile := filepath.Join(t.TempDir(), "digests.txt")
+	if err := os.WriteFile(digestFile, []byte(strings.Repeat("ab", 48)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (ImagePolicySource{File: digestFile}).Load(MeasurementPins{}); err == nil {
+		t.Fatal("newline digest file accepted as a complete JSON policy")
+	}
+	if _, err := LoadMeasurements(nil, identityPolicyFile); err == nil {
+		t.Fatal("complete JSON policy accepted as a digest list")
+	}
+}
+
+func TestMeasurementPolicySupportsDigestFileAndRegisterOnlyPins(t *testing.T) {
+	digest := strings.Repeat("ab", 48)
+	register := strings.Repeat("cd", 48)
+	path := filepath.Join(t.TempDir(), "digests.txt")
+	if err := os.WriteFile(path, []byte("\n"+digest+"\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := ImagePolicySource{}
+	policy, err := source.Load(MeasurementPins{Measurements: []string{register}, MeasurementsFile: path, Registers: []string{"1=" + register}})
+	if err != nil || len(policy.Measurements) != 2 || len(policy.Registers[1]) != 48 || len(policy.Images) != 0 {
+		t.Fatalf("union/register policy changed: %+v, %v", policy, err)
+	}
+	policy, err = source.Load(MeasurementPinsFromStrings("", "1="+register, "cds-"))
+	if err != nil || len(policy.Measurements) != 0 || len(policy.Registers[1]) != 48 || len(policy.Images) != 0 {
+		t.Fatalf("register-only policy was dropped: %+v, %v", policy, err)
+	}
+	policy, err = source.Load(MeasurementPinsFromStrings("", "", ""))
+	if err != nil || len(policy.Measurements) != 0 || len(policy.Registers) != 0 || len(policy.Images) != 0 {
+		t.Fatalf("empty policy changed: %+v, %v", policy, err)
+	}
+	for _, tc := range []struct{ measurements, rtmrs, flag string }{
+		{"bad", "", "--cds-measurements"},
+		{"", "bad", "--cds-rtmrs"},
+	} {
+		if _, err := source.Load(MeasurementPinsFromStrings(tc.measurements, tc.rtmrs, "cds-")); err == nil || !strings.Contains(err.Error(), tc.flag) {
+			t.Fatalf("invalid flag %s: %v", tc.flag, err)
+		}
+	}
+}
+
+func TestImagePolicyFlagsCanonicalSources(t *testing.T) {
+	doc, err := os.ReadFile(identityPolicyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"image-policy-file", "image-policy-json"} {
+		t.Run(flag, func(t *testing.T) {
+			fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			var source ImagePolicySource
+			BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test identity policy")
+			value := identityPolicyFile
+			if strings.HasSuffix(flag, "json") {
+				value = string(doc)
+			}
+			if err := fs.Parse([]string{"--" + flag, value}); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := source.Load(MeasurementPins{})
+			if err != nil || len(policy.Images) != 2 || len(policy.Images[0].Anchor) == 0 {
+				t.Fatalf("flag lost identity policy: %+v, %v", policy, err)
+			}
+			if fs.Lookup(flag).Value.String() != value || fs.Lookup(flag).Value.Type() != "string" {
+				t.Fatal("flag did not retain its source value")
+			}
+		})
+	}
+}
+
+func TestImagePolicyFlagsRejectMixedSources(t *testing.T) {
+	names := []string{"image-policy-file", "image-policy-json"}
+	for _, first := range names {
+		for _, second := range names {
+			if first == second {
+				continue
+			}
+			t.Run(first+"+"+second, func(t *testing.T) {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				var source ImagePolicySource
+				BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test")
+				err := fs.Parse([]string{"--" + first, "first", "--" + second, "second"})
+				if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+					t.Fatalf("ambiguous policy flags accepted: %v", err)
+				}
+			})
+		}
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		var source ImagePolicySource
+		BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test")
+		if err := fs.Parse([]string{"--" + first, ""}); err == nil {
+			t.Fatalf("explicit empty %s silently disabled pinning", first)
+		}
+	}
+}
+
+func TestImagePolicyFileFlagsKeepIndependentCDSSelection(t *testing.T) {
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	var peers, cds string
+	BindImagePolicyFlags(fs, &peers, nil, "", "mesh peers")
+	BindImagePolicyFlags(fs, &cds, nil, "cds-", "CDS")
+	if fs.Lookup("image-policy-json") != nil || fs.Lookup("measurements-config-json") != nil {
+		t.Fatal("file-only command unexpectedly exposed inline JSON")
+	}
+	if err := fs.Parse([]string{"--image-policy-file", "peers.json", "--cds-image-policy-file", "cds.json"}); err != nil {
+		t.Fatal(err)
+	}
+	if peers != "peers.json" || cds != "cds.json" {
+		t.Fatal("separate CDS policy replaced the peer policy")
+	}
+}
+
+func TestImagePolicyFlagsRejectRemovedAliases(t *testing.T) {
+	for _, prefix := range []string{"", "cds-"} {
+		for _, name := range []string{"measurements-config", "measurements-config-json"} {
+			t.Run(prefix+name, func(t *testing.T) {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				var source ImagePolicySource
+				BindImagePolicyFlags(fs, &source.File, &source.JSON, prefix, "test")
+				if err := fs.Parse([]string{"--" + prefix + name, "policy.json"}); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+					t.Fatalf("removed alias accepted: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestLoadImagePolicyValuesPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		wantErr  bool
+	}{
+		{"", false}, {"tdx", false}, {"az-tdx", false}, {"gcp-tdx", false},
+		{"snp", true}, {"az-snp", true}, {"gcp-snp", true}, {"sev-snp", true}, {"invalid", true},
+	} {
+		t.Run(tc.platform, func(t *testing.T) {
+			values, err := LoadImagePolicyValues(ImagePolicyValuesConfig{
+				Source:       ImagePolicySource{File: identityPolicyFile},
+				Platform:     tc.platform,
+				PlatformFlag: "--ratls-platform",
+			})
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--ratls-platform") || !values.Empty() {
+					t.Fatalf("wrong-platform policy was accepted: %+v, %v", values, err)
+				}
+				return
+			}
+			if err != nil || len(values.Images) != 2 || !values.HasAnchors() {
+				t.Fatalf("complete identity was lost: %+v, %v", values, err)
+			}
+		})
+	}
+}
+
+func TestLoadImagePolicyValuesRejectsInputsBeforeReading(t *testing.T) {
+	_, err := LoadImagePolicyValues(ImagePolicyValuesConfig{
+		Source:   ImagePolicySource{File: "missing"},
+		Pins:     MeasurementPins{Measurements: []string{"invalid"}},
+		Platform: "invalid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("policy conflict was not reported before reading: %v", err)
+	}
+	values, err := LoadImagePolicyValues(ImagePolicyValuesConfig{})
+	if err != nil || !values.Empty() {
+		t.Fatalf("absent policy: %+v, %v", values, err)
+	}
+}
+
+func TestLoadImagePolicyValuesKeepsPerImageRTMRs(t *testing.T) {
+	digest := strings.Repeat("ab", 48)
+	first, second := strings.Repeat("cd", 48), strings.Repeat("ef", 48)
+	doc := `{"schema_version":"1","tee":"tdx","measurements":[` +
+		`{"name":"first","mrtd":"` + digest + `","rtmr":[null,"` + first + `"]},` +
+		`{"name":"second","mrtd":"` + digest + `","rtmr":[null,"` + second + `"]}]}`
+	values, err := LoadImagePolicyValues(ImagePolicyValuesConfig{
+		Source:   ImagePolicySource{JSON: doc},
+		Platform: "tdx",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values.Images) != 2 || len(values.Images[0].Registers) != 1 || len(values.Images[1].Registers) != 1 || bytes.Equal(values.Images[0].Registers[1], values.Images[1].Registers[1]) {
+		t.Fatalf("per-image register tuples were lost: %+v", values.Images)
+	}
+}

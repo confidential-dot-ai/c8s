@@ -5,8 +5,11 @@ package ratlsmesh
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -683,7 +686,7 @@ func TestRunIptablesCleanupKeepGuardLeavesFailClosed(t *testing.T) {
 	}
 }
 
-// The daemonset preStop hook execs `ratls-mesh iptables-cleanup
+// The daemonset's cleanup sidecar runs `ratls-mesh iptables-cleanup
 // [--keep-guard]`; the flag must parse and reach runIptablesCleanup.
 func TestIptablesCleanupCommandKeepGuardFlag(t *testing.T) {
 	nf := installFakeNetfilter(t)
@@ -1000,12 +1003,10 @@ func cwPodStore(t *testing.T) cache.Store {
 	t.Helper()
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	if err := store.Add(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "serving",
-			Namespace: "demo",
-			Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
-		},
-		Status: corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
+		Name:      "serving",
+		Namespace: "demo",
+		Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
+		Status:    corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
 	}); err != nil {
 		t.Fatalf("seed pod store: %v", err)
 	}
@@ -1050,5 +1051,98 @@ func TestReconcilePodIPSetsAttemptsEverySetWhenOneFails(t *testing.T) {
 	}
 	if got := iptablesIPSetSyncFailures() - before; got != 6 {
 		t.Errorf("sync failures counted %d, want one per managed set (6)", got)
+	}
+}
+
+// The cleanup sidecar replaced its preStop exec hook with SIGTERM handling
+// (a locked node image denies every runc exec), so --on-shutdown must
+// clean up when — and only when — the root context is cancelled.
+func TestIptablesCleanupOnShutdown(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	nf.set("ipset_destroy_ok", "")
+
+	cmd := newIptablesCleanupCommand()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd.SetContext(ctx)
+	for flag, value := range map[string]string{"on-shutdown": "true", "keep-guard": "true", "settle-delay": "1ms"} {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("set --%s: %v", flag, err)
+		}
+	}
+
+	capture := captureStdout(t)
+	done := make(chan error, 1)
+	go func() { done <- cmd.RunE(cmd, nil) }()
+
+	select {
+	case err := <-done:
+		capture.stop()
+		t.Fatalf("iptables-cleanup --on-shutdown returned before SIGTERM: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	for _, call := range nf.calls() {
+		if strings.Contains(call, "-t nat -X "+chainName) {
+			capture.stop()
+			t.Fatalf("cleanup ran before the shutdown signal: %q", call)
+		}
+	}
+
+	cancel()
+	err := <-done
+	capture.stop()
+	if err != nil {
+		t.Fatalf("iptables-cleanup --on-shutdown: %v", err)
+	}
+	var removed bool
+	for _, call := range nf.calls() {
+		if strings.Contains(call, "-t nat -X "+chainName) {
+			removed = true
+		}
+		if strings.Contains(call, "-t filter -X "+cwChainName) {
+			t.Errorf("--keep-guard deleted the guard chain on shutdown: %q", call)
+		}
+	}
+	if !removed {
+		t.Errorf("shutdown did not remove the interception chain; calls: %v", nf.calls())
+	}
+}
+
+// The startup probe that gates the mesh proxy on interception being installed
+// is an HTTP endpoint, not an exec probe: it must refuse until the initial
+// sync has completed.
+func TestReadinessEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ready, err := serveReadiness(ctx, "127.0.0.1:0", logger)
+	if err != nil {
+		t.Fatalf("serveReadiness: %v", err)
+	}
+	if ready.Load() {
+		t.Error("the readiness flag starts set")
+	}
+
+	rec := httptest.NewRecorder()
+	handler := readinessHandler(ready)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /readyz before the initial sync = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	ready.Store(true)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /readyz after the initial sync = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+// An empty --ready-addr disables the endpoint rather than failing the sync.
+func TestReadinessEndpointDisabled(t *testing.T) {
+	ready, err := serveReadiness(context.Background(), "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || ready == nil {
+		t.Fatalf("serveReadiness(\"\") = %v, %v, want a usable flag", ready, err)
 	}
 }

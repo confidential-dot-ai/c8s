@@ -4,15 +4,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func newInjectablePod() *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 }
 

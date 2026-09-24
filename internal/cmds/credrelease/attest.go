@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 )
 
 // AttestPath serves operator-authorized, nonce-bound bootstrap evidence.
@@ -18,6 +21,17 @@ const attestTimeout = 30 * time.Second
 // The operator token must authorize these exact request bytes.
 type AttestRequest struct {
 	Nonce []byte `json:"nonce"`
+}
+
+// localEvidenceGenerator fixes the upstream to the configured local API.
+type localEvidenceGenerator struct {
+	client attestclient.Client
+	apiURL string
+}
+
+func (g localEvidenceGenerator) GenerateEvidence(ctx context.Context, nonce []byte) (teetypes.AttestationEvidence, error) {
+	response, err := g.client.GenerateEvidenceContext(ctx, g.apiURL, nonce)
+	return response.Envelope(), err
 }
 
 // serveAttest is reached only after ServeHTTP authorizes the request.
@@ -33,13 +47,13 @@ func (h *Handler) serveAttest(w http.ResponseWriter, r *http.Request, body []byt
 		http.Error(w, "invalid attestation request", http.StatusBadRequest)
 		return
 	}
-	if h.generateEvidence == nil {
+	if h.attester == nil {
 		http.Error(w, "attestation unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), attestTimeout)
 	defer cancel()
-	evidence, err := h.generateEvidence(ctx, req.Nonce)
+	evidence, err := h.attester.GenerateEvidence(ctx, req.Nonce)
 	if err != nil {
 		http.Error(w, "attestation unavailable", http.StatusBadGateway)
 		return

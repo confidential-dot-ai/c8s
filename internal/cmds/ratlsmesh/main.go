@@ -168,8 +168,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
-	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to atomic mesh peer image/operator identities; also used for CDS unless --cds-measurements-config is set")
-	fs.StringVar(&c.cdsMeasurementsConfig, "cds-measurements-config", "", "path to the CDS-only image/operator identities; independent of the mesh peer policy")
+	cmdsutil.BindImagePolicyFlags(fs, &c.measurementsConfig, nil, "", "pins mesh peers; also pins CDS unless --cds-image-policy-file is set; excludes --measurements and --rtmrs")
+	cmdsutil.BindImagePolicyFlags(fs, &c.cdsMeasurementsConfig, nil, "cds-", "pins CDS independently of mesh peers; excludes --cds-measurements and --cds-rtmrs")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -250,8 +250,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
 	}
-	if len(meshPolicy.Policy.RTMRs) > 0 {
-		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.RTMRs))
+	if len(meshPolicy.Policy.Registers) > 0 {
+		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.Registers))
 	} else if c.platform == "tdx" && len(meshPolicy.Policy.Measurements) > 0 {
 		logger.Warn("no --rtmrs set: TDX measurement pinning covers TDVF firmware only (MRTD); peer guest kernel and rootfs are not pinned")
 	}
@@ -291,7 +291,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
+	cdsRTMRs, err := refvalues.ParseRegisterPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
@@ -499,6 +499,7 @@ type iptablesSyncConfig struct {
 	ipsetMaxElem            int
 	cwInboundPassthrough    string
 	readyFile               string
+	readyAddr               string
 	metricsFile             string
 	logLevel                string
 }
@@ -526,13 +527,18 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")
 	fs.StringVar(&cfg.cwInboundPassthrough, "cw-inbound-passthrough", formatCWPassthrough(defaultCWPassthrough), "comma-separated proto:source-port replies exempted from the always-on cw inbound guard (which drops FORWARD-path traffic to confidential.ai/cw pods). Each entry matches only a destination port in 32768-60999 and, for TCP, a reply segment shape. Empty = strict drop-all; DNS is the default")
 	fs.StringVar(&cfg.readyFile, "ready-file", "", "path to write after initial ipset and iptables sync succeeds")
+	fs.StringVar(&cfg.readyAddr, "ready-addr", "", "host:port serving GET /readyz, 200 once the initial sync succeeded (empty disables it). The DaemonSet's startup probe uses it: a locked node image denies exec probes")
 	fs.StringVar(&cfg.metricsFile, "iptables-metrics-file", defaultIptablesMetricsFile, "shared file where iptables-sync publishes counters (empty disables)")
 	fs.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	return cmd
 }
 
 func newIptablesCleanupCommand() *cobra.Command {
-	var keepGuard bool
+	var (
+		keepGuard   bool
+		onShutdown  bool
+		settleDelay time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "iptables-cleanup",
 		Short: "Remove iptables NAT rules and ipsets created by the mesh",
@@ -541,18 +547,42 @@ func newIptablesCleanupCommand() *cobra.Command {
 With --keep-guard the fail-closed guard (RATLS-MESH-CW and
 RATLS-MESH-CW-EGRESS filter chains, their FORWARD jumps, and the cw pod
 ipsets) is left in place while the traffic-interception NAT rules are
-removed. The daemonset preStop hook uses this so a terminating mesh keeps
+removed. The daemonset's cleanup sidecar uses this so a terminating mesh keeps
 the guard live: unmeshed inbound and non-TCP egress are still dropped; TCP
 to non-pod destinations was never meshed. A full teardown (no
---keep-guard) also removes the guard.`,
+--keep-guard) also removes the guard.
+
+With --on-shutdown the command instead idles until SIGTERM and cleans up
+then. That is how the DaemonSet's cleanup sidecar runs it: a locked node
+image denies every runc exec, so a lifecycle exec hook would never run.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runIptablesCleanup(keepGuard)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !onShutdown {
+				return runIptablesCleanup(keepGuard)
+			}
+			if settleDelay < 0 {
+				return fmt.Errorf("--settle-delay must not be negative, got %s", settleDelay)
+			}
+			// Native sidecars stop in reverse init order, so this SIGTERM
+			// arrives after the proxy has drained — the ordering the preStop
+			// hook used to give.
+			<-cmd.Context().Done()
+			if err := runIptablesCleanup(keepGuard); err != nil {
+				return err
+			}
+			// Stay alive briefly so the pod's last flows finish against the
+			// cleaned-up rules rather than a half-torn-down netns.
+			time.Sleep(settleDelay)
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&keepGuard, "keep-guard", false,
 		"keep the fail-closed filter guard (cw chains + cw ipsets) while removing interception")
+	cmd.Flags().BoolVar(&onShutdown, "on-shutdown", false,
+		"idle until SIGTERM, then clean up (the DaemonSet sidecar's mode)")
+	cmd.Flags().DurationVar(&settleDelay, "settle-delay", 0,
+		"with --on-shutdown, how long to stay alive after cleanup")
 	return cmd
 }
 
@@ -632,15 +662,15 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 // development only).
 func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
-	pins, err := refvalues.ParseRTMRPinsString(rtmrs)
+	pins, err := refvalues.ParseRegisterPinsString(rtmrs)
 	if err != nil {
 		return nil, fmt.Errorf("--rtmrs: %w", err)
 	}
-	policy.Policy.RTMRs = pins
+	policy.Policy.Registers = pins
 	if measurements == "" {
 		return policy, nil
 	}
-	for _, h := range strings.Split(measurements, ",") {
+	for h := range strings.SplitSeq(measurements, ",") {
 		h = strings.TrimSpace(h)
 		b, err := hex.DecodeString(h)
 		if err != nil {

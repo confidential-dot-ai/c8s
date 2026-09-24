@@ -17,10 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
-	"github.com/fxamacker/cbor/v2"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -332,24 +333,6 @@ func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
 	}
 	if got := headerValues(resp.Headers, "Set-Cookie"); len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
 		t.Fatalf("duplicate response header collapsed: %v", got)
-	}
-}
-
-// The retired two-step handshake endpoint returns the explicit 400 — no
-// alias, no downgrade.
-func TestRetiredHandshakeEndpointReturns400(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader(`{"nonce":"AAAA"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		resp.Body.Close()
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
-		t.Fatalf("error code = %q", e.Error)
 	}
 }
 

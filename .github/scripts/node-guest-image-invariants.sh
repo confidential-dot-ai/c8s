@@ -58,15 +58,13 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI base allowlist is a template: its permissive workloads
-# carry @-token digests the sync fills with ref-resolved values; a hardcoded
-# sha256 would bake a stale digest the fail-closed plugin can't reconcile
-# with the ref. The marked block is exempt: systemfloor generates it from
-# the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI template contains only the generated RKE2 system floor.
+# The complete chart component seed is merged into it before containerd starts;
+# duplicating component digests here would drift from the rendered workloads.
 policy="$ngi/c8s/image-policy.yaml.in"
 [ -f "$policy" ] || { echo "::error::NRI base template $policy not found"; exit 1; }
 if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
-  echo "::error::$policy has a hardcoded base digest outside the generated system base; use the @OPERATOR_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
+  echo "::error::$policy has a hardcoded base digest outside the generated system base; derive core component pins from the build-time chart seed"
   exit 1
 fi
 
@@ -87,20 +85,102 @@ if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   exit 1
 fi
 
-# The locked image must keep the kubelet debugging handlers off (no kubectl
-# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
-# turn them back on, and only through the sync-rendered drop-in.
-if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
-  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+# The kubelet debugging handlers stay on (they back kubectl logs, which the
+# log-reader credential exists for); exec/attach/port-forward/ephemeral
+# containers are closed at the apiserver by the baked pod-exec-policy AddOn
+# (its shape and expression are tested in internal/helmchart). Only the
+# C8S_DEV=1 build may skip that AddOn, and only through the sync-rendered
+# .skip marker.
+manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+sync="$ngi/c8s/mkosi.sync"
+if ! grep -qxF '  - enable-debugging-handlers=true' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=true (kubectl logs)"
   exit 1
 fi
-if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
-  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+# cred-release identities are bounded: the operator binding must not name
+# cluster-admin (the baked guards must hold against the credential holder).
+if grep -q 'name: cluster-admin' "$manifests/cred-release-rbac.yaml"; then
+  echo "::error::$manifests/cred-release-rbac.yaml binds the operator to cluster-admin; the baked guards must hold against the credential holder"
+  exit 1
+fi
+# Every guard AddOn — each baked admission policy and each binding of a
+# cred-release group — must be staged by mkosi.sync as a reference copy on
+# the read-only root, where psa-ready.sh waits for it and compares the live
+# objects against it. mkosi.sync's GUARDS list is the single statement of
+# what is a guard; check it against the manifests rather than repeating it.
+guards=$(sed -n 's/^GUARDS="\(.*\)"$/\1/p' "$sync")
+if [ -z "$guards" ] || ! grep -q 'usr/lib/confai/guards' "$sync"; then
+  echo "::error::$sync must list the guard AddOns in GUARDS= and stage them under /usr/lib/confai/guards"
+  exit 1
+fi
+for guard in $guards; do
+  if [ ! -f "$manifests/$guard.yaml" ]; then
+    echo "::error::$sync stages $guard.yaml as a guard but $manifests/$guard.yaml is missing"
+    exit 1
+  fi
+done
+for file in $(grep -lE 'kind: ValidatingAdmissionPolicy$|name: c8s:' "$manifests"/*.yaml); do
+  guard=$(basename "$file" .yaml)
+  case " $guards " in
+    *" $guard "*) ;;
+    *)
+      echo "::error::$file is a guard (an admission policy or a cred-release group binding) but $sync GUARDS= does not stage it"
+      exit 1
+      ;;
+  esac
+done
+if find "$ngi/c8s/mkosi.extra" -name '*.skip' | grep -q .; then
+  echo "::error::a baked .skip marker disables an RKE2 AddOn; only mkosi.sync may render one, for dev=1"
   exit 1
 fi
 if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
    || ! grep -q 'SYNC_INPUTS/dev' "$ngi/c8s/mkosi.sync"; then
   echo "::error::the dev sync-input must flow from $ngi/build (C8S_DEV) into mkosi.sync"
+  exit 1
+fi
+
+# The locked image seals post-start exec at the runc boundary: every
+# ordinary pod runs through the measured wrapper, which denies `runc exec`
+# (c8s internal/cmds/c8srunc, docs/node-exec-mode.md). containerdcheck
+# renders the effective containerd config and proves the handlers; these
+# checks cover what a rendered config cannot show — that the wrapper the
+# config names is the binary the build installs, and that RKE2's runtime
+# auto-detection finds nothing else to add a handler for.
+wrapper_dropin="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/10-c8s-runc.toml"
+wrapper_path=$(sed -n 's/^[[:space:]]*BinaryName[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$wrapper_dropin" | head -n1)
+if [ "$wrapper_path" != "/usr/local/bin/c8s-runc" ]; then
+  echo "::error::$wrapper_dropin must set the runc handler's BinaryName to /usr/local/bin/c8s-runc (got '${wrapper_path:-none}')"
+  exit 1
+fi
+if ! grep -q "RUNC_WRAPPER_TARGET=\"\$STAGE_DIR${wrapper_path}\"" "$ngi/c8s/mkosi.sync"; then
+  echo "::error::mkosi.sync must install the runtime wrapper at $wrapper_path, the path $wrapper_dropin names"
+  exit 1
+fi
+# The wrapper execs the real runtime by absolute path; it is rke2's own runc,
+# extracted at first start under the bin symlink. Both sides pin it.
+real_runc=$(sed -n 's/^REAL_RUNC="\(.*\)"$/\1/p' "$ngi/c8s/mkosi.sync")
+if ! grep -qF "realRunc = \"$real_runc\"" internal/cmds/c8srunc/c8srunc.go; then
+  echo "::error::the wrapper's compiled real-runtime path and mkosi.sync's REAL_RUNC ($real_runc) have drifted"
+  exit 1
+fi
+# RKE2 adds a runtime handler for each of these it finds on PATH
+# (k3s pkg/agent/containerd/runtimes.go); none of them is wrapped.
+for rt in crun nvidia-container-runtime nvidia-container-runtime-experimental \
+          nvidia-container-runtime.cdi containerd-shim-lunatic-v1 \
+          containerd-shim-slight-v1 containerd-shim-spin-v2 containerd-shim-wws-v1 \
+          containerd-shim-wasmedge-v1 containerd-shim-wasmer-v1 containerd-shim-wasmtime-v1; do
+  if find "$ngi/c8s/mkosi.extra" -name "$rt" -print -quit | grep -q .; then
+    echo "::error::$ngi/c8s/mkosi.extra bakes '$rt'; RKE2 auto-detects it and adds an UNWRAPPED runtime handler"
+    exit 1
+  fi
+done
+# The gate renders RKE2's base template from a vendored copy; an RKE2 bump
+# that changes it must re-vendor, or the gate checks a config the node never
+# has.
+base_tmpl="$ngi/c8s/containerdcheck/rke2-base-v3.toml.tmpl"
+rke2_version=$(sed -n 's/^RKE2_VERSION="\(.*\)"$/\1/p' "$ngi/c8s/mkosi.sync")
+if ! grep -qF "# RKE2_VERSION: $rke2_version" "$base_tmpl"; then
+  echo "::error::$base_tmpl is vendored from another RKE2 than $rke2_version; re-vendor ContainerdConfigTemplateV3 from the k3s revision that RKE2 builds against and update its header"
   exit 1
 fi
 
@@ -213,6 +293,15 @@ if grep -qF '/usr/lib/confai/state.d' "$init"; then
       exit 1
     fi
   done
+  # The NRI storage inspector classifies a state.d overlay from this boot's
+  # scratch mapping, which holds only while one scratch-backed /state supplies
+  # every overlay's upper layer.
+  for pin in 'mount_state_backing /state' 'upperdir=/state/$2/upper'; do
+    if ! grep -qF "$pin" "$init"; then
+      echo "::error::confos initrd changed how state overlays are backed (missing: $pin); internal/cmds/nri-image-policy/mount_storage_linux.go reads that contract — update both together"
+      exit 1
+    fi
+  done
 elif [ "${EXPECT_IMMUTABLE_ROOT:-1}" = 1 ]; then
   echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
   exit 1
@@ -232,7 +321,7 @@ fi
 # pods, and the baked policy that stops tenants relabelling their namespaces
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
-vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+vap="$manifests/psa-level-policy.yaml"
 psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
@@ -270,11 +359,14 @@ if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
   exit 1
 fi
 for required in \
-  'get validatingadmissionpolicy "$policy"' \
-  'get validatingadmissionpolicybinding "$policy"' \
+  'GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}' \
+  'replace --dry-run=server -f "$file"' \
+  'get -f "$file"' \
   '--as="$probe_user" create --dry-run=server' \
   'probe_namespace restricted' \
-  'probe_namespace privileged'; do
+  'probe_namespace privileged' \
+  'probe_scope default' \
+  'probe_scope kube-system'; do
   if ! grep -qF -- "$required" "$psa_gate"; then
     echo "::error::$psa_gate is missing required live admission probe: $required"
     exit 1
@@ -294,10 +386,11 @@ grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/syste
 
 # The image renders Kubernetes integration from its staged binary at BUILD
 # time. It must not revive a c8s HelmChart or boot-time values merge.
-sync="$ngi/c8s/mkosi.sync"
 for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
              '--kube-version "${RKE2_VERSION%%+*}"' \
-             'c8s-integration.yaml' '/usr/lib/c8s/nginx.conf.in' '/usr/lib/c8s/allowlist-seed.json'; do
+             'c8s-integration.yaml' '/usr/lib/c8s/allowlist-seed.json' \
+             '--cds-image-digest "$CDS_DIGEST"' '--ratls-mesh-image-digest "$MESH_DIGEST"' \
+             'c8s/airgap-images.sh' '"$out/images.txt"'; do
   if ! grep -qF -- "$token" "$sync"; then
     echo "::error::$sync must stage the measured node integration (missing: $token)"
     exit 1
@@ -359,43 +452,40 @@ if grep -qE 'joindata|defaulting to server|set_legacy_server_role' "$role_sh"; t
   exit 1
 fi
 
-for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy join-release; do
-  mapfile -t service_files < <(grep -lE "^ExecStart=.*node-services run $command$" "$units"/*.service)
-  if [ "${#service_files[@]}" != 1 ]; then
-    echo "::error::expected one baked systemd unit for node-services run $command"
+# Only attestation access, node inventory, credential release and attested
+# enrollment remain host services. Core application lifecycle belongs to the
+# baked Kubernetes chart.
+for service in attest-proxy nri-node-ip cred-release c8s-join c8s-join-release; do
+  require_launch_dependency "$units/$service.service"
+  if ! grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$preset must enable $service.service"
     exit 1
   fi
-  service=${service_files[0]}
-  require_launch_dependency "$service"
-  if ! grep -qxF "enable ${service##*/}" "$preset"; then
-    echo "::error::$preset must enable ${service##*/}"
-    exit 1
-  fi
-  case "$command" in
-    mesh|mesh-sync|attest-proxy)
-      if grep -qF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must run on both authenticated roles"
-        exit 1
-      fi ;;
-    *)
-      if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must be server-only"
-        exit 1
-      fi ;;
-  esac
 done
-# Enrollment must not depend on the mesh or kubelet, which need RKE2 first.
+for service in cds ratls-mesh ratls-mesh-iptables c8s-get-cert cds-attest allowlist-proxy c8s-nginx; do
+  if [ -e "$units/$service.service" ] || grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$service must run from measured Kubernetes manifests, not a duplicate host unit"
+    exit 1
+  fi
+done
+if ! grep -qF 'ExecStart=/usr/local/bin/c8s attest-proxy ' "$units/attest-proxy.service"; then
+  echo "::error::host attestation access must retain its fixed proxy entrypoint"
+  exit 1
+fi
+
+# Attested enrollment replaces launch-media join credentials: the agent unit
+# gates rke2-agent on a released token, the release unit serves only agents
+# the signed document authorizes, and neither may depend on the mesh or
+# kubelet, which need RKE2 first.
 join_unit="$units/c8s-join.service"
 release_unit="$units/c8s-join-release.service"
-require_launch_dependency "$join_unit"
-for setting in 'ConditionPathExists=/run/confos/role-agent' 'Wants=rke2-agent.service' 'Type=oneshot' \
+for setting in 'ConditionPathExists=/run/confos/role-agent' 'Type=oneshot' \
                'RemainAfterExit=yes' 'StartLimitIntervalSec=0' \
                'Restart=on-failure' 'RestartSec=5' \
                'ExecStart=/usr/local/bin/c8s node-services run join'; do
   grep -qxF "$setting" "$join_unit" || { echo "::error::$join_unit lost enrollment gate: $setting"; exit 1; }
 done
-if ! grep -qxF 'enable c8s-join.service' "$preset" \
-   || ! grep -qE '^Requires=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf" \
+if ! grep -qE '^Requires=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf" \
    || ! grep -qE '^After=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf"; then
   echo "::error::RKE2 agent must require and start after the enabled enrollment gate"
   exit 1
@@ -412,23 +502,17 @@ for enrollment_unit in "$join_unit" "$release_unit"; do
   fi
 done
 if ! grep -qxF 'ConditionPathExists=/run/confos/launch/agents.json' "$release_unit" \
+   || ! grep -qxF 'ExecStart=/usr/local/bin/c8s node-services run join-release' "$release_unit" \
    || ! grep -qE '^After=.*rke2-server[.]service' "$release_unit"; then
   echo "::error::join release must wait for the server and require authorized agents"
   exit 1
 fi
-mapfile -t nginx_files < <(grep -lE '^ExecStart=.*/nginx ' "$units"/*.service)
-if [ "${#nginx_files[@]}" != 1 ]; then
-  echo "::error::expected one baked nginx service"
+# Launch media is public policy: nothing under the profile may stage or
+# expect an RKE2 credential from the signed document.
+if grep -rqE 'serverToken|agentToken|rke2-server-token' "$ngi/c8s/mkosi.extra" "$role_sh"; then
+  echo "::error::the measured image must not consume RKE2 credentials from launch media"
   exit 1
 fi
-require_launch_dependency "${nginx_files[0]}"
-if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "${nginx_files[0]}" \
-   || ! grep -qxF "enable ${nginx_files[0]##*/}" "$preset" \
-   || ! grep -qxF 'disable nginx.service' "$preset"; then
-  echo "::error::only the authenticated server nginx service may be enabled"
-  exit 1
-fi
-require_launch_dependency "$units/cred-release.service"
 
 # A host-accessible arbitrary REPORTDATA API would let a host borrow a real
 # node's attestation for its own keys. The finalize hook preserves the selected

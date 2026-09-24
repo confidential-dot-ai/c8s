@@ -28,6 +28,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
 // TestHandlerReleasesServerCA drives POST /release-credential end to end and
 // checks the wire response: CAPEM is the serving-CA PEM verbatim and the
 // issued cert chains to the client CA.
@@ -57,10 +61,13 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	}
 	ca.pem = certutil.EncodeCertPEM(serverCA.Cert.Raw)
 
-	h, err := NewHandler(pubPEM, ca, defaultCertOrg, defaultCertCN, time.Hour)
+	h, err := NewHandler(pubPEM, ca, defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	issuedAt := time.Now().Truncate(time.Second).Add(5 * time.Minute)
+	h.clock = fixedClock{now: issuedAt}
 
 	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -99,9 +106,14 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(ca.cert)
-	if _, err := parseLeaf(t, []byte(resp.CertPEM)).Verify(x509.VerifyOptions{
-		Roots:     roots,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	leaf := parseLeaf(t, []byte(resp.CertPEM))
+	if !leaf.NotBefore.Equal(issuedAt.Add(-time.Minute)) || !leaf.NotAfter.Equal(issuedAt.Add(time.Hour)) {
+		t.Errorf("certificate validity = %v..%v, want injected clock %v with one-minute backdate and one-hour TTL", leaf.NotBefore, leaf.NotAfter, issuedAt)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:       roots,
+		CurrentTime: issuedAt,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
 		t.Errorf("released cert does not chain to the client CA: %v", err)
 	}
@@ -112,7 +124,7 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 // endpoint that issues cluster-admin credentials.
 func TestReleaseRefusesATokenBoundToAnotherCSR(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
-	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +210,7 @@ func csrPEMFromKey(t *testing.T, key crypto.Signer) []byte {
 
 // TestNewHandlerRejectsBadPubkey: the measured key must be an ECDSA PKIX PEM.
 func TestNewHandlerRejectsBadPubkey(t *testing.T) {
-	if _, err := NewHandler([]byte("not a key"), testCA(t), defaultCertOrg, defaultCertCN, time.Hour); err == nil {
+	if _, err := NewHandler([]byte("not a key"), testCA(t), defaultRoles()); err == nil {
 		t.Error("expected error for non-PEM operator pubkey")
 	}
 }
@@ -217,7 +229,7 @@ func TestHandlerToleratesTokenClockSkew(t *testing.T) {
 	}
 	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
 
-	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +283,7 @@ func TestHandlerSigningFailureIsServerError(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
 	ca := testCA(t)
 	ca.key = stubSigner{}
-	h, err := NewHandler(pubPEM, ca, defaultCertOrg, defaultCertCN, time.Hour)
+	h, err := NewHandler(pubPEM, ca, defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +322,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
 // method, authorization, body decoding, CSR validation, and signing.
 func TestServeHTTPErrorPaths(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
-	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultRoles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,5 +423,94 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestHandlerIssuesPerRoleIdentity: the role in the (token-bound) body
+// selects the Subject and TTL; "" is the operator for the pre-role wire
+// format; anything else is a 400, never a fallback to the operator identity.
+func TestHandlerIssuesPerRoleIdentity(t *testing.T) {
+	signer, pubPEM := newOperatorAuth(t)
+	ca := testCA(t)
+	h, err := NewHandler(pubPEM, ca, defaultRoles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	h.clock = fixedClock{now: now}
+	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrPEM := string(csrPEMFromKey(t, csrKey))
+
+	release := func(t *testing.T, role string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(ReleaseRequest{CSRPEM: csrPEM, Role: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authz, err := signer.Authorization(http.MethodPost, ReleasePath, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, ReleasePath, bytes.NewReader(body))
+		req.Header.Set("Authorization", authz)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, tt := range []struct {
+		role    string
+		wantOrg string
+		wantCN  string
+		wantTTL time.Duration
+	}{
+		{"", defaultCertOrg, defaultCertCN, defaultCertTTL},
+		{RoleOperator, defaultCertOrg, defaultCertCN, defaultCertTTL},
+		{RoleLogReader, defaultLogCertOrg, defaultLogCertCN, defaultLogCertTTL},
+	} {
+		t.Run("role="+tt.role, func(t *testing.T) {
+			rec := release(t, tt.role)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
+			}
+			var resp ReleaseResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			leaf := parseLeaf(t, []byte(resp.CertPEM))
+			if got := leaf.Subject.Organization; len(got) != 1 || got[0] != tt.wantOrg {
+				t.Errorf("O = %v, want [%s]", got, tt.wantOrg)
+			}
+			if leaf.Subject.CommonName != tt.wantCN {
+				t.Errorf("CN = %q, want %q", leaf.Subject.CommonName, tt.wantCN)
+			}
+			if !leaf.NotAfter.Equal(now.Add(tt.wantTTL)) {
+				t.Errorf("NotAfter = %v, want %v", leaf.NotAfter, now.Add(tt.wantTTL))
+			}
+		})
+	}
+	t.Run("unknown role", func(t *testing.T) {
+		rec := release(t, "cluster-admin")
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown role") {
+			t.Fatalf("status = %d, body %q; want 400 unknown role", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestNewHandlerRejectsIncompleteRoles: a role with an empty Subject or a
+// non-positive TTL would mint an unbindable or instantly-expired cert; refuse
+// it at startup.
+func TestNewHandlerRejectsIncompleteRoles(t *testing.T) {
+	_, pubPEM := newOperatorAuth(t)
+	for name, roles := range map[string]Roles{
+		"missing log-reader": {RoleOperator: defaultRoles()[RoleOperator]},
+		"zero ttl":           {RoleOperator: defaultRoles()[RoleOperator], RoleLogReader: {Org: "g", CN: "u"}},
+		"no operator org":    {RoleOperator: {CN: "u", TTL: time.Hour}, RoleLogReader: defaultRoles()[RoleLogReader]},
+	} {
+		if _, err := NewHandler(pubPEM, testCA(t), roles); err == nil {
+			t.Errorf("%s: NewHandler accepted incomplete roles", name)
+		}
 	}
 }

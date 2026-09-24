@@ -49,8 +49,10 @@ host can flip bits or roll it back, and c8s cannot detect that.
 
 The image is written as ciphertext and can travel by any means, including
 through the untrusted host. Attach it to the node as a raw block device whose
-disk serial is c8s-vol-<name> — with virtio-blk where the hypervisor allows it,
-or 'c8s volume attach' on the node where it does not.
+disk serial is c8s-vol-<name>. On QEMU/KVM, cold-plug virtio-blk at VM launch
+or hot-attach scsi-hd on a virtio-scsi controller provisioned at launch.
+'c8s volume attach' requires a Linux node with LIO support and is unsupported
+on the c8s node image. See docs/volumes.md for attachment recipes.
 
 The key is generated here and exists in exactly two places: the CDS process, and
 the escrow file. A CDS restart empties the store, and without the escrow file
@@ -241,6 +243,10 @@ func printResult(w io.Writer, cfg createConfig, path string, size uint64, v Veri
 	fmt.Fprintf(w, "\nAllowlist grant for the workload entry (read-only, exact path):\n")
 	fmt.Fprintf(w, "  \"secrets\": {\"policy\": \"allow\", \"read\": [%q]}\n", path)
 	fmt.Fprintf(w, "\nA subtree grant would cover every volume beneath it, so this names one path.\n")
+
+	fmt.Fprintf(w, "\nAllowlist mount policy for every container in the entry:\n")
+	fmt.Fprintf(w, "  \"mounts\": {\"policy\": \"any\"}\n")
+	fmt.Fprintf(w, "\nThe webhook mounts this volume and the cert volume into every container, and the\nentry's mount policy has to admit them. docs/volumes.md — \"The mount policy\" —\nhas the exact form.\n")
 }
 
 func base64Std(b []byte) string { return base64.StdEncoding.EncodeToString(b) }

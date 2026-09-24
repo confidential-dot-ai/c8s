@@ -1,8 +1,8 @@
-## The measured node image owns core service processes. Build-time rendering
-## retains Kubernetes workload integration and reads verified boot settings
-## from the c8s-node-runtime ConfigMap. Ordinary Helm installs leave this off.
+## Render Kubernetes core services into the measured node image at build time.
+## Signed launch policies are staged on each node at /run/c8s-node; the host
+## owns attestation, RKE2 and NRI. Ordinary Helm installs leave this off.
 node:
-  bakedServices: false
+  baked: false
 
 ## The c8s component image set: the single source the chart and `c8s install`
 ## both enumerate from, so adding a component is one edit here.
@@ -285,7 +285,7 @@ cds:
   ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
   ## Measurements config: the JSON document listing the VM images this cluster
   ## runs, each pinned as a whole image. Content, not a path — set it with
-  ## `c8s install --measurements-config <file>` or `helm --set-file`. Empty
+  ## `c8s install --image-policy-file <file>` or `helm --set-file`. Empty
   ## disables whole-image matching; `measurements` above still pins.
   measurementsConfig: ""
   operatorKeys: ""
@@ -331,6 +331,10 @@ attestationApi:
   ## the attest-proxy sidecar serves it on a hostPath Unix socket in
   ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
   proxy:
+    ## Port the proxy serves GET /healthz on for the kubelet's probes. The
+    ## body is "ok" or an error — never evidence — but it is reachable from
+    ## other pods, so keep it off the ports other components use.
+    healthPort: 8401
     resources:
       requests:
         cpu: 10m
@@ -430,6 +434,9 @@ ratlsMesh:
     outbound: 15001
     inbound: 15006
     health: 15021
+    ## iptables-sync's readiness endpoint, bound to node loopback only (the
+    ## DaemonSet is hostNetwork). The mesh proxy's start is gated on it.
+    iptablesReady: 15022
 
   # UID for the ratls-mesh process (iptables excludes this UID)
   uid: 1337
@@ -730,9 +737,11 @@ nriImagePolicy:
     restartCommand: ""
 
   refresh:
-    # How often the worker plugin pulls the current allowlist from CDS. This
-    # bounds how long a freshly applied workload entry is still refused at
-    # container start.
+    # How often the worker plugin pulls the current allowlist from CDS. A
+    # written entry keeps its previous admission verdict at container start —
+    # an added entry refused, a narrowed one still admitted — for up to one
+    # interval after CDS commits the write. Under `baked` the plugin runs the
+    # equal value measured into the node image, which an override cannot reach.
     interval: 5s
 
   # --- Bootstrap allowlist ---
@@ -1181,11 +1190,8 @@ router:
   nginx:
     image:
       repository: nginxinc/nginx-unprivileged
-      # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
-      # core modules router uses; the full/perl variants ship image-filter,
-      # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
-      # Accepted CVEs against this pin live in .grype.yaml.
-      digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+      # Resolve nginxinc/nginx-unprivileged:1.30.5-alpine-slim to bump this digest.
+      digest: "sha256:c2c3905bda3dc8de80023e19bed0a45745279d26e5586cdee64370c8f9b12348"
       tag: ""
       pullPolicy: IfNotPresent
     # -- Number of nginx replicas.

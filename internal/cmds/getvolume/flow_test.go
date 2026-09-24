@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -163,15 +162,13 @@ func testMutableBlobJSON(t *testing.T) []byte {
 func flowConfig(t *testing.T, url string) config {
 	t.Helper()
 	return config{
-		Config: sidecar.Config{
-			CDSURL:           url,
-			Attempts:         3,
-			RetryInterval:    time.Millisecond,
-			RequestTimeout:   5 * time.Second,
-			InventoryTimeout: 5 * time.Second,
-		},
-		SocketDir: t.TempDir(),
-		Volumes:   []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
+		CDSURL:           url,
+		Attempts:         3,
+		RetryInterval:    time.Millisecond,
+		RequestTimeout:   5 * time.Second,
+		InventoryTimeout: 5 * time.Second,
+		SocketDir:        t.TempDir(),
+		Volumes:          []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
 	}
 }
 
@@ -259,7 +256,7 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 	})
 	cfg := flowConfig(t, url)
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		_, _ = fetchBlob(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights")
 	}
 

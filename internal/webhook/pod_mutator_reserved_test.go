@@ -6,9 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -33,10 +31,8 @@ func TestPreDeclaredReservedMountIsForcedReadOnly(t *testing.T) {
 				MountPath: "/attacker/chosen/path",
 			}}
 			pod.Spec.Volumes = []corev1.Volume{{
-				Name: tc.volume,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
-				},
+				Name:     tc.volume,
+				EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
 			}}
 
 			mutateWithSecrets(t, pod, []string{"DB=/api/db"}, "")
@@ -98,10 +94,8 @@ func TestEphemeralGuardIgnoresAnnotationRewrite(t *testing.T) {
 	// ephemeral container mounting the real cert volume.
 	pod.Annotations[AnnotationCertVolume] = "decoy"
 	pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
-			Name:         "debugger",
-			VolumeMounts: []corev1.VolumeMount{{Name: "my-certs", MountPath: "/x"}},
-		},
+		Name:         "debugger",
+		VolumeMounts: []corev1.VolumeMount{{Name: "my-certs", MountPath: "/x"}},
 	}}
 
 	if err := rejectEphemeralReservedMounts(pod); err == nil {
@@ -149,10 +143,10 @@ func handleSecretsPod(t *testing.T, cfg Config) admission.Response {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload: "api",
 			AnnotationSecrets:  "DB=/api/db",
-		}},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
@@ -161,10 +155,8 @@ func handleSecretsPod(t *testing.T, cfg Config) admission.Response {
 	}
 	m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: cfg}
 	return m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Namespace: "tenant",
-			Object:    runtime.RawExtension{Raw: raw},
-		},
+		Namespace: "tenant",
+		Object:    runtime.RawExtension{Raw: raw},
 	})
 }
 

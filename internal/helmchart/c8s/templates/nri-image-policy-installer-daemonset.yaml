@@ -11,6 +11,7 @@ runs the pins script instead: it writes this release's CDS pins into that config
 and restarts containerd when they change.
 */}}
 {{- if .Values.nriImagePolicy.enabled }}
+{{- include "nri-image-policy.validateCDSPolicy" . }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet

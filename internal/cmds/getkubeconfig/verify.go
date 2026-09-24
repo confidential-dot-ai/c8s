@@ -23,7 +23,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
@@ -244,15 +243,25 @@ func readAttestationResponse(client *http.Client, req *http.Request) ([]byte, er
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		const maxErrorBody = 1024
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
+		if err != nil {
+			return nil, err
+		}
+		suffix := ""
+		if len(respBody) > maxErrorBody {
+			respBody = respBody[:maxErrorBody]
+			suffix = "... (truncated)"
+		}
+		return nil, fmt.Errorf("attest HTTP %d: %s%s", resp.StatusCode, respBody, suffix)
+	}
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(respBody) > 8<<20 {
 		return nil, fmt.Errorf("attestation response exceeds 8 MiB")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("attest HTTP %d: %s", resp.StatusCode, respBody)
 	}
 	return respBody, nil
 }
@@ -296,10 +305,8 @@ func (exp measuredPolicy) verificationParams(reportData []byte) localverify.Para
 		measurements = append(measurements, append([]byte(nil), v.Digest[:]...))
 	}
 	return localverify.Params{
-		Measurements: measurements,
-		VerifyParams: teetypes.VerifyParams{
-			ExpectedReportData:   reportData,
-			ExpectedInitDataHash: hostData[:],
-		},
+		Measurements:         measurements,
+		ExpectedReportData:   reportData,
+		ExpectedInitDataHash: hostData[:],
 	}
 }

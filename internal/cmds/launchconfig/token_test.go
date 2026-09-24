@@ -30,7 +30,7 @@ func TestServerCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("agent credential is not private")
 	}
-	for _, path := range []string{cfg.DocumentPath, cfg.path(DefaultStagedPath), cfg.path(runtimeManifestPath), cfg.path(Dir + "/peers.json"), cfg.path(Dir + "/agents.json")} {
+	for _, path := range []string{cfg.DocumentPath, cfg.path(DefaultStagedPath), cfg.path(Dir + "/peers.json"), cfg.path(Dir + "/agents.json")} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

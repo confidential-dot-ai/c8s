@@ -9,22 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
-
-	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	psaapi "k8s.io/pod-security-admission/api"
 	psapolicy "k8s.io/pod-security-admission/policy"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func TestMutatePodInjectsCertSidecar(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Annotations: map[string]string{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "app"}},
 		},
@@ -124,8 +122,8 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 // it lands. The env is unconditional (harmless when the URL has no placeholder).
 func TestMutatePodCertSidecarCarriesHostIPEnv(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
@@ -156,7 +154,7 @@ func TestMutatePodCertSidecarCarriesHostIPEnv(t *testing.T) {
 func TestMutatePodPreservesExistingFSGroup(t *testing.T) {
 	existing := int64(1234)
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Annotations: map[string]string{},
 		Spec: corev1.PodSpec{
 			SecurityContext: &corev1.PodSecurityContext{FSGroup: &existing},
 			Containers:      []corev1.Container{{Name: "app"}},
@@ -177,7 +175,7 @@ func TestMutatePodPreservesExistingFSGroup(t *testing.T) {
 
 func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Annotations: map[string]string{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "app"}},
 		},
@@ -188,11 +186,11 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		CDSURL:              "http://cds",
 		AttestationApiURL:   "http://attestation-api",
 		CertDir:             "/etc/c8s/certs",
-		CertFSGroup:         ptr.To(int64(4242)),
+		CertFSGroup:         new(int64(4242)),
 		CertRenewInterval:   time.Hour,
-		GetCertRunAsUser:    ptr.To(int64(0)),
-		GetCertRunAsGroup:   ptr.To(int64(0)),
-		GetCertRunAsNonRoot: ptr.To(false),
+		GetCertRunAsUser:    new(int64(0)),
+		GetCertRunAsGroup:   new(int64(0)),
+		GetCertRunAsNonRoot: new(false),
 	})
 
 	if got := *pod.Spec.SecurityContext.FSGroup; got != 4242 {
@@ -218,7 +216,7 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 
 func TestMutatePodSupportsRouterProfile(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload:               "c8s-router.c8s-system.svc",
 			AnnotationCertVolume:             "tls-certs",
 			AnnotationCertDir:                "/tls",
@@ -239,7 +237,7 @@ func TestMutatePodSupportsRouterProfile(t *testing.T) {
 			AnnotationGetCertRunAsGroup:      "101",
 			AnnotationGetCertRunAsNonRoot:    "true",
 			AnnotationGetCertVerbose:         "true",
-		}},
+		},
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{
 				{Name: "tls-certs"},
@@ -308,7 +306,7 @@ func TestMutatePodSupportsRouterProfile(t *testing.T) {
 
 func TestMutatePodStampsWorkloadLabel(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Annotations: map[string]string{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "app"}},
 		},
@@ -331,9 +329,9 @@ func TestParseAnnotationsRejectsWorkloadIDInvalidAsLabelValue(t *testing.T) {
 		"waaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay-too-long-for-a-label-value",
 	} {
 		_, err := parseAnnotations(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			Annotations: map[string]string{
 				AnnotationWorkload: id,
-			}},
+			},
 		})
 		if !errors.Is(err, errInvalidInjectionAnnotation) {
 			t.Fatalf("parseAnnotations(%q) error = %v, want invalid annotation", id, err)
@@ -355,7 +353,7 @@ func TestValidateWorkloadLabelRequiresMatchingAnnotation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		err := validateWorkloadLabel(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: tc.labels, Annotations: tc.ann},
+			Labels: tc.labels, Annotations: tc.ann,
 		})
 		if tc.wantErr && !errors.Is(err, errInvalidInjectionAnnotation) {
 			t.Fatalf("%s: err = %v, want invalid annotation", tc.name, err)
@@ -368,10 +366,10 @@ func TestValidateWorkloadLabelRequiresMatchingAnnotation(t *testing.T) {
 
 func TestParseAnnotationsRejectsInvalidRenewInterval(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload:      "api",
 			AnnotationRenewInterval: "not-a-duration",
-		}},
+		},
 	})
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("parseAnnotations error = %v, want invalid annotation", err)
@@ -380,9 +378,9 @@ func TestParseAnnotationsRejectsInvalidRenewInterval(t *testing.T) {
 
 func TestParseAnnotationsRejectsInjectionDetailsWithoutWorkloadAnnotation(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationCertVolume: "tls-certs",
-		}},
+		},
 	})
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("parseAnnotations error = %v, want invalid annotation", err)
@@ -391,10 +389,10 @@ func TestParseAnnotationsRejectsInjectionDetailsWithoutWorkloadAnnotation(t *tes
 
 func TestParseAnnotationsRejectsReloadWatchWithoutMount(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload:         "api",
 			AnnotationReloadWatchPaths: "/public-tls/tls.crt",
-		}},
+		},
 	})
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("parseAnnotations error = %v, want invalid annotation", err)
@@ -403,10 +401,10 @@ func TestParseAnnotationsRejectsReloadWatchWithoutMount(t *testing.T) {
 
 func TestParseAnnotationsRejectsIncompleteDiscovery(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload:            "api",
 			AnnotationDiscoveryCDSCertURL: "/.well-known/cds-cert.pem",
-		}},
+		},
 	})
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("parseAnnotations error = %v, want invalid annotation", err)
@@ -415,14 +413,14 @@ func TestParseAnnotationsRejectsIncompleteDiscovery(t *testing.T) {
 
 func TestParseAnnotationsRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload:               "api",
 			AnnotationDiscoveryVolume:        "discovery",
 			AnnotationDiscoveryMountPath:     "/discovery",
 			AnnotationDiscoveryOut:           "/discovery/discovery.json",
 			AnnotationDiscoveryCDSCertURL:    "/.well-known/cds-cert.pem",
 			AnnotationDiscoveryPublicTLSMode: "invalid",
-		}},
+		},
 	})
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("parseAnnotations error = %v, want invalid annotation", err)
@@ -430,12 +428,7 @@ func TestParseAnnotationsRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 }
 
 func hasArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(args, want)
 }
 
 func hasMount(mounts []corev1.VolumeMount, name, path string, readOnly bool) bool {
@@ -486,18 +479,16 @@ func TestHandleDerivesServiceSAN(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{AnnotationWorkload: "api"},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: raw},
-		},
+		Namespace: "default",
+		Object:    runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("Handle denied: %v", resp.Result)
@@ -529,18 +520,16 @@ func TestHandleRejectsCWHostNetwork(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-		Spec:       corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{AnnotationWorkload: "api"},
+		Spec:        corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: raw},
-		},
+		Namespace: "default",
+		Object:    runtime.RawExtension{Raw: raw},
 	})
 	if resp.Allowed {
 		t.Fatal("Handle admitted a cw hostNetwork pod; want denial")
@@ -564,7 +553,7 @@ func TestHandleAllowsPlainHostNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+		Namespace: "default", Object: runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("Handle denied a plain hostNetwork pod: %v", resp.Result)
@@ -592,10 +581,10 @@ func initContainersPatch(t *testing.T, resp admission.Response) []corev1.Contain
 }
 
 func TestParseAnnotationsSANOverride(t *testing.T) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+	pod := &corev1.Pod{Annotations: map[string]string{
 		AnnotationWorkload: "api",
 		AnnotationSAN:      "api.default.svc",
-	}}}
+	}}
 	inj, err := parseAnnotations(pod)
 	if err != nil {
 		t.Fatalf("parseAnnotations: %v", err)
@@ -625,10 +614,10 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload: "api",
 			AnnotationSAN:      "api.default.svc",
-		}},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
@@ -636,10 +625,8 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Namespace: "default",
-			Object:    runtime.RawExtension{Raw: raw},
-		},
+		Namespace: "default",
+		Object:    runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("Handle denied: %v", resp.Result)
@@ -660,7 +647,7 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 func TestMutatePodReplacesPreexistingCertContainer(t *testing.T) {
 	decoy := int64(0)
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Annotations: map[string]string{},
 		Spec: corev1.PodSpec{
 			InitContainers: []corev1.Container{{
 				Name:            "c8s-cert",
@@ -708,8 +695,8 @@ func TestMutatePodReplacesPreexistingCertContainer(t *testing.T) {
 // one cert volume, one mount per container.
 func TestMutatePodInjectionIsIdempotent(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	cfg := Config{
 		GetCertImage:      "img",
@@ -762,7 +749,7 @@ func TestHandleRejectsReservedCertContainerName(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Annotations: map[string]string{AnnotationWorkload: "api"},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: "app"},
 			{Name: "c8s-cert", Image: "attacker/pause"},
@@ -773,7 +760,7 @@ func TestHandleRejectsReservedCertContainerName(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+		Namespace: "default", Object: runtime.RawExtension{Raw: raw},
 	})
 	if resp.Allowed {
 		t.Fatal("Handle admitted a cw pod with a reserved c8s-cert container; want denial")
@@ -803,7 +790,7 @@ func TestHandleRejectsReservedCertVolumeCollision(t *testing.T) {
 	handle := func(t *testing.T, vol corev1.Volume) admission.Response {
 		t.Helper()
 		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+			Annotations: map[string]string{AnnotationWorkload: "api"},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "app"}},
 				Volumes:    []corev1.Volume{vol},
@@ -814,7 +801,7 @@ func TestHandleRejectsReservedCertVolumeCollision(t *testing.T) {
 			t.Fatal(err)
 		}
 		return m.Handle(context.Background(), admission.Request{
-			AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+			Namespace: "default", Object: runtime.RawExtension{Raw: raw},
 		})
 	}
 
@@ -837,8 +824,8 @@ func TestHandleRejectsReservedCertVolumeCollision(t *testing.T) {
 	}
 
 	t.Run("accepts memory emptyDir", func(t *testing.T) {
-		resp := handle(t, corev1.Volume{Name: certVol, VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}})
+		resp := handle(t, corev1.Volume{Name: certVol,
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}})
 		if !resp.Allowed {
 			t.Fatalf("Handle denied a cw pod with a correct memory-backed cert volume: %+v", resp.Result)
 		}
@@ -864,10 +851,10 @@ func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		Annotations: map[string]string{
 			AnnotationWorkload: "api",
 			AnnotationInjected: "true",
-		}},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
@@ -875,7 +862,7 @@ func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+		Namespace: "default", Object: runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("Handle denied: %v", resp.Result)
@@ -910,7 +897,7 @@ func TestParseAnnotationsWatchPathsImplyNginxReload(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			pod := &corev1.Pod{Annotations: tc.annotations}
 			inj, err := parseAnnotations(pod)
 			if err != nil {
 				t.Fatalf("parseAnnotations: %v", err)
@@ -953,15 +940,15 @@ func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
 		}.withDefaults(),
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{AnnotationWorkload: "api"},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	raw, err := json.Marshal(pod)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+		Namespace: "default", Object: runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("Handle denied: %v", resp.Result)
@@ -996,8 +983,8 @@ func TestWorkloadServiceFQDN(t *testing.T) {
 // only negative values disable the mutation.
 func TestMutatePodAppliesZeroFSGroup(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage: "image",
@@ -1076,8 +1063,8 @@ func TestEnsureSupplementalGroup(t *testing.T) {
 // mutatePod sets fsGroup first and the broker-socket group is added alongside.
 func TestMutatePodKeepsFSGroupWithWorkloadClaims(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "image",
@@ -1096,8 +1083,8 @@ func TestMutatePodKeepsFSGroupWithWorkloadClaims(t *testing.T) {
 // a slow CDS cold start is absorbed in one wait.
 func TestCertWaitContainerTimeout(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Annotations: map[string]string{},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{GetCertImage: "image"})
 	wait := pod.Spec.InitContainers[1]
@@ -1257,8 +1244,8 @@ func TestHandleLeavesNonCWPodWithForgedInjectedAnnotationAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationInjected: "true"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: reservedCertContainerName}}},
+		Annotations: map[string]string{AnnotationInjected: "true"},
+		Spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: reservedCertContainerName}}},
 	}
 	raw, err := json.Marshal(pod)
 	if err != nil {
@@ -1266,7 +1253,7 @@ func TestHandleLeavesNonCWPodWithForgedInjectedAnnotationAlone(t *testing.T) {
 	}
 	m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: secretsConfig()}
 	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "tenant", Object: runtime.RawExtension{Raw: raw}},
+		Namespace: "tenant", Object: runtime.RawExtension{Raw: raw},
 	})
 	if !resp.Allowed {
 		t.Fatalf("non-cw pod denied: %+v", resp.Result)
@@ -1297,16 +1284,16 @@ func evaluateRestricted(t *testing.T, pod *corev1.Pod) psapolicy.AggregateCheckR
 // fails restricted by its own choice.
 func TestMutatePodStaysRestrictedAdmissible(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Annotations: map[string]string{AnnotationWorkload: "api"},
 		Spec: corev1.PodSpec{
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot:   ptr.To(true),
+				RunAsNonRoot:   new(true),
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
 				Name: "app",
 				SecurityContext: &corev1.SecurityContext{
-					AllowPrivilegeEscalation: ptr.To(false),
+					AllowPrivilegeEscalation: new(false),
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
 			}},
@@ -1321,10 +1308,8 @@ func TestMutatePodStaysRestrictedAdmissible(t *testing.T) {
 	legacy := pod.DeepCopy()
 	hpType := corev1.HostPathDirectory
 	legacy.Spec.Volumes = append(legacy.Spec.Volumes, corev1.Volume{
-		Name: "c8s-workload-claims",
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/nri-image-policy", Type: &hpType},
-		},
+		Name:     "c8s-workload-claims",
+		HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/nri-image-policy", Type: &hpType},
 	})
 	if agg := evaluateRestricted(t, legacy); agg.Allowed {
 		t.Fatal("evaluator admitted a hostPath claims volume; the control proves nothing")
@@ -1376,6 +1361,34 @@ func TestFetchersCarryCDSRTMRPins(t *testing.T) {
 	for _, arg := range containerNamed(unpinned, reservedCertContainerName).Args {
 		if strings.HasPrefix(arg, "--cds-rtmrs") {
 			t.Fatalf("c8s-cert carries %q with no RTMR pins configured", arg)
+		}
+	}
+}
+
+// The set of containers injection adds must equal what
+// workloadclaims.IsInjectedContainerName matches: `c8s allowlist derive` drops
+// exactly that set from an admitted pod, so a fifth injected container added
+// here without the predicate learning its name would be silently derived into
+// every workload entry.
+func TestInjectedContainersMatchThePublishedNameSet(t *testing.T) {
+	cfg := secretsConfig()
+	pod := podWithApp()
+	pod.Spec.InitContainers = []corev1.Container{{Name: "seed"}}
+	authored := map[string]bool{"app": true, "seed": true}
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	all := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+	if len(all) != len(authored)+4 {
+		t.Fatalf("containers = %d, want the 2 authored plus 4 injected: %+v", len(all), all)
+	}
+	for _, c := range all {
+		if workloadclaims.IsInjectedContainerName(c.Name) == authored[c.Name] {
+			t.Errorf("container %q: authored %v but IsInjectedContainerName %v; derive would drop the wrong set",
+				c.Name, authored[c.Name], workloadclaims.IsInjectedContainerName(c.Name))
 		}
 	}
 }

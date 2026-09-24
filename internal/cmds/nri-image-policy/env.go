@@ -15,13 +15,13 @@ import (
 // ValidateContainerAdjustment runs after all create-time plugins. Unlike a
 // StartContainer notification, a failed/disconnected validator rejects creation.
 // Together with containerd's required_plugins configuration this prevents a
-// plugin disconnect between creation and start from bypassing env admission.
+// plugin disconnect between creation and start from bypassing launch admission.
 func (p *plugin) ValidateContainerAdjustment(ctx context.Context, req *api.ValidateContainerAdjustmentRequest) error {
 	if req.GetContainer() == nil || req.GetPod() == nil {
 		return fmt.Errorf("missing container or sandbox in NRI validation")
 	}
 	ctr, env := adjustedLaunchContainer(req)
-	verdict, reason := p.checkContainerObserved(ctx, p.cfg, req.GetPod(), ctr, ctr.GetAnnotations()[annotationImageName], true, env)
+	verdict, reason := p.checkContainerObserved(ctx, p.cfg, req.GetPod(), ctr, ctr.GetAnnotations()[annotationImageName], launchFinal, env, adjustedMounts(req, ctr))
 	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
 		return fmt.Errorf("%s", reason)
 	}
@@ -47,7 +47,7 @@ func adjustedLaunchContainer(req *api.ValidateContainerAdjustmentRequest) (*api.
 	if len(adjust.GetEnv()) == 0 {
 		return ctr, containerEnv(ctr)
 	}
-	if _, err := allowlist.ObserveEnv(ctr.Env); err != nil {
+	if _, err := observeEnv(ctr); err != nil {
 		return ctr, nil
 	}
 	values := map[string]string{}
@@ -74,4 +74,24 @@ func adjustedLaunchContainer(req *api.ValidateContainerAdjustmentRequest) (*api.
 		ctr.Env = append(ctr.Env, name+"="+value)
 	}
 	return ctr, containerEnv(ctr)
+}
+
+// adjustedMounts observes cumulative edits; deferred CDI leaves evidence unavailable.
+func adjustedMounts(req *api.ValidateContainerAdjustmentRequest, ctr *api.Container) []allowlist.ObservedMount {
+	if len(req.GetAdjust().GetCDIDevices()) > 0 {
+		return nil
+	}
+	for _, edit := range req.GetAdjust().GetMounts() {
+		if edit == nil {
+			return nil
+		}
+		destination, remove := edit.IsMarkedForRemoval()
+		ctr.Mounts = slices.DeleteFunc(ctr.Mounts, func(m *api.Mount) bool {
+			return m.GetDestination() == destination
+		})
+		if !remove {
+			ctr.Mounts = append(ctr.Mounts, proto.Clone(edit).(*api.Mount))
+		}
+	}
+	return newMountObserver(nil).Observe(req.GetPod(), ctr)
 }

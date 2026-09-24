@@ -7,13 +7,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // buildInventoryHosts resolves the sandbox-digests dial bound: the operator's
@@ -30,13 +31,26 @@ func buildInventoryHosts(ctx context.Context, cidrs []string, kubeconfig string)
 // package var so tests can shorten it.
 var nodeCacheSyncTimeout = 90 * time.Second
 
-// newKubeClientset is a package var so tests can substitute a fake clientset.
-var newKubeClientset = func() (kubernetes.Interface, error) {
+// newInClusterKubeClientset is a package var so tests can substitute a fake clientset.
+var newInClusterKubeClientset = func() (kubernetes.Interface, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s in-cluster config: %w", err)
 	}
 	return kubernetes.NewForConfig(restCfg)
+}
+
+// newKubeClientsetFromFile uses only the explicitly selected kubeconfig.
+func newKubeClientsetFromFile(kubeconfig string) (kubernetes.Interface, error) {
+	restCfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("load node inventory kubeconfig: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create node inventory client: %w", err)
+	}
+	return clientset, nil
 }
 
 // watchNodeInventoryHosts keeps the dial bound current with the node list: a
@@ -50,16 +64,12 @@ func watchNodeInventoryHosts(ctx context.Context, kubeconfig string) (workloadcl
 	var clientset kubernetes.Interface
 	var err error
 	if kubeconfig != "" {
-		restCfg, configErr := clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if configErr != nil {
-			return nil, fmt.Errorf("load node inventory kubeconfig: %w", configErr)
-		}
-		clientset, err = kubernetes.NewForConfig(restCfg)
+		clientset, err = newKubeClientsetFromFile(kubeconfig)
 		if err != nil {
-			return nil, fmt.Errorf("create node inventory client: %w", err)
+			return nil, err
 		}
 	} else {
-		clientset, err = newKubeClientset()
+		clientset, err = newInClusterKubeClientset()
 	}
 	if err != nil {
 		slog.Warn("--sandbox-inventory-cidr not set and no in-cluster config: CDS will refuse any request carrying a sandbox token", "error", err)
@@ -95,9 +105,9 @@ func watchNodeInventoryHosts(ctx context.Context, kubeconfig string) (workloadcl
 		mu.Unlock()
 	}
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { resync() },
-		UpdateFunc: func(_, _ interface{}) { resync() },
-		DeleteFunc: func(interface{}) { resync() },
+		AddFunc:    func(any) { resync() },
+		UpdateFunc: func(_, _ any) { resync() },
+		DeleteFunc: func(any) { resync() },
 	}); err != nil {
 		return nil, fmt.Errorf("node informer: add event handler: %w", err)
 	}

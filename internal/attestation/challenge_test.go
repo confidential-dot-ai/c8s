@@ -179,7 +179,7 @@ func TestCreateEvictsTheOldestAtCapacity(t *testing.T) {
 func TestCreateHoldsTheBoundUnderConcurrency(t *testing.T) {
 	const minters = 256
 	store := NewChallengeStore(time.Hour)
-	for i := 0; i < maxChallenges; i++ {
+	for range maxChallenges {
 		store.Create()
 	}
 
@@ -192,13 +192,11 @@ func TestCreateHoldsTheBoundUnderConcurrency(t *testing.T) {
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for i := 0; i < minters; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range minters {
+			wg.Go(func() {
 				<-start
 				store.Create()
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()
@@ -257,7 +255,7 @@ func TestCompactionKeepsLiveChallengesInOrder(t *testing.T) {
 	// the queue compacts at.
 	const liveEvery = 100
 	var live [][32]byte
-	for i := 0; i < 3*maxChallenges; i++ {
+	for i := range 3 * maxChallenges {
 		challenge := store.Create()
 		if i%liveEvery == 0 {
 			live = append(live, challenge)
@@ -315,7 +313,7 @@ func TestConsumedChallengesDoNotOccupyCapacity(t *testing.T) {
 	store := NewChallengeStore(time.Hour)
 	kept := store.Create()
 
-	for i := 0; i < 3*maxChallenges; i++ {
+	for i := range 3 * maxChallenges {
 		challenge := store.Create()
 		if !store.Consume(challenge[:]) {
 			t.Fatalf("challenge %d did not consume", i)
@@ -351,7 +349,7 @@ func TestConsumedChallengesDoNotOccupyCapacity(t *testing.T) {
 // side: consuming everything leaves neither the map nor the queue holding it.
 func TestConsumedChallengesLeaveNoResidue(t *testing.T) {
 	store := NewChallengeStore(time.Hour)
-	for i := 0; i < 3*maxChallenges; i++ {
+	for i := range 3 * maxChallenges {
 		challenge := store.Create()
 		if !store.Consume(challenge[:]) {
 			t.Fatalf("challenge %d did not consume", i)

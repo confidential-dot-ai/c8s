@@ -2,17 +2,45 @@ package credrelease
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"golang.org/x/net/netutil"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
+
+// maxConcurrentConns caps accepted sockets. cred-release is the external
+// credential choke point and binds every interface, so an unbounded accept
+// loop lets any peer that can route to the guest spend its memory and its
+// attestation-api budget on handshakes alone.
+const maxConcurrentConns = 64
+
+// newServer builds the release HTTP server. The resource bounds live here so
+// they are stated once and can be asserted: none of them changes how the
+// service answers a legitimate request, so a regression is otherwise silent.
+func newServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		// Allow the bounded body read, attestation, and response write.
+		WriteTimeout: attestTimeout + 20*time.Second,
+		IdleTimeout:  30 * time.Second,
+		// Go's 1MiB default lets one unauthenticated request buy far more
+		// memory than any real CSR needs.
+		MaxHeaderBytes: 16 << 10,
+	}
+}
 
 // Config is the release service configuration.
 type Config struct {
@@ -36,10 +64,25 @@ type Config struct {
 	CertTTL time.Duration
 	// CertOrg / CertCN are the Kubernetes group / user the issued cert carries.
 	// Authorization is ordinary RBAC on that group: the node image's baked
-	// cred-release-rbac AddOn binds defaultCertOrg to cluster-admin. Revocation
+	// cred-release-rbac AddOn binds defaultCertOrg to the bounded
+	// c8s-node-operator ClusterRole (never cluster-admin). Revocation
 	// semantics are in docs/operator.md.
 	CertOrg string
 	CertCN  string
+	// LogCertTTL / LogCertOrg / LogCertCN are the same for the log-reader
+	// role (RoleLogReader); the node image binds defaultLogCertOrg to the
+	// baked c8s-log-reader ClusterRole.
+	LogCertTTL time.Duration
+	LogCertOrg string
+	LogCertCN  string
+}
+
+// roles is the per-role identity set the handler issues from this Config.
+func (cfg Config) roles() Roles {
+	return Roles{
+		RoleOperator:  {Org: cfg.CertOrg, CN: cfg.CertCN, TTL: cfg.CertTTL},
+		RoleLogReader: {Org: cfg.LogCertOrg, CN: cfg.LogCertCN, TTL: cfg.LogCertTTL},
+	}
 }
 
 // Run loads the measured operator key and cluster CA, then serves the
@@ -53,7 +96,7 @@ type Config struct {
 //  3. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
 func Run(ctx context.Context, cfg Config) error {
-	// RA-TLS is mandatory here: this endpoint hands out cluster-admin creds,
+	// RA-TLS is mandatory here: this endpoint hands out operator creds,
 	// so serving without an attested cert (empty platform => plain HTTP in the
 	// ratls package) would let a host MITM impersonate the guest. Reject it.
 	if strings.TrimSpace(cfg.Platform) == "" {
@@ -76,15 +119,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}
 
-	handler, err := NewHandler(operatorPub, ca, cfg.CertOrg, cfg.CertCN, cfg.CertTTL)
+	handler, err := NewHandler(operatorPub, ca, cfg.roles())
 	if err != nil {
 		return fmt.Errorf("build handler: %w", err)
 	}
 	attestationClient := attestclient.NewClient("")
-	handler.generateEvidence = func(ctx context.Context, nonce []byte) (teetypes.AttestationEvidence, error) {
-		response, err := attestationClient.GenerateEvidenceContext(ctx, cfg.AttestationAPIURL, nonce)
-		return response.Envelope(), err
-	}
+	handler.attester = localEvidenceGenerator{client: attestationClient, apiURL: cfg.AttestationAPIURL}
 
 	// RA-TLS serving config: the presented cert embeds a fresh TDX quote
 	// bound to its own public key, so the operator's RA-TLS client verifies
@@ -110,21 +150,19 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("warm up RA-TLS serving cert: %w", err)
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           handler,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		// A slow reader or parked keep-alive must not hold a goroutine open.
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  30 * time.Second,
+	srv := newServer(cfg.ListenAddr, handler, tlsCfg)
+
+	// Bind explicitly so the accepted sockets can be capped: every connection
+	// costs an RA-TLS handshake before the operator token is ever checked.
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		// certs come from tlsCfg (RA-TLS), so no cert/key files.
-		errCh <- srv.ListenAndServeTLS("", "")
+		errCh <- srv.ServeTLS(netutil.LimitListener(ln, maxConcurrentConns), "", "")
 	}()
 
 	select {

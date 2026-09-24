@@ -28,11 +28,11 @@ cw_namespace_owned() { [ "${CW_NAMESPACE_CREATED:-}" = "$1" ]; }
 
 # cds_measurement_args fills the measurement_args array with the CDS endpoint
 # pin: a complete policy file (C8S_MEASUREMENTS_CONFIG) when supplied, else the
-# legacy launch-only digest (C8S_MEASUREMENTS), which is then required.
+# launch-only digest (C8S_MEASUREMENTS), which is then required.
 # shellcheck disable=SC2034  # the array is consumed by the sourcing script
 cds_measurement_args() {
   if [ -n "${C8S_MEASUREMENTS_CONFIG:-}" ]; then
-    measurement_args=(--measurements-config "$C8S_MEASUREMENTS_CONFIG")
+    measurement_args=(--image-policy-file "$C8S_MEASUREMENTS_CONFIG")
   else
     : "${C8S_MEASUREMENTS:?pins the launch measurement of the CDS endpoint}"
     measurement_args=(--measurements "$C8S_MEASUREMENTS")

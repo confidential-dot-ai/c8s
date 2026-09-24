@@ -290,24 +290,29 @@ var combinedPlatforms = []struct {
 
 // The combined loader answers both questions off one self-report: the guest
 // attests itself once per boot, not once per check.
-func TestLoadMeasuredOperatorKeyAndOwnMeasurementAttestsOnce(t *testing.T) {
+func TestLoadMeasuredIdentityAttestsOnce(t *testing.T) {
 	for _, p := range combinedPlatforms {
 		t.Run(p.name, func(t *testing.T) {
 			stageOperatorPubkey(t, operatorPub)
 			launchDigest := fill(0xab)
 			stub := stubAttester(t, operatorReport(p.platform, launchDigest))
 
-			gotPub, pubErr, gotMeasurement, gotRTMRs, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, stub.URL())
+			got, err := LoadMeasuredIdentity(context.Background(), p.name, stub.URL())
 			if err != nil {
-				t.Fatalf("LoadMeasuredOperatorKeyAndOwnMeasurement: %v", err)
+				t.Fatalf("LoadMeasuredIdentity: %v", err)
 			}
-			if pubErr != nil {
-				t.Fatalf("pubErr: %v", pubErr)
+			if got.OperatorKeyErr != nil {
+				t.Fatalf("got.OperatorKeyErr: %v", got.OperatorKeyErr)
 			}
-			if string(gotPub) != string(operatorPub) {
-				t.Errorf("pub = %q, want %q", gotPub, operatorPub)
+			if string(got.OperatorKey) != string(operatorPub) {
+				t.Errorf("got.OperatorKey = %q, want %q", got.OperatorKey, operatorPub)
 			}
-			if !bytes.Equal(gotMeasurement, launchDigest) {
+			gotMeasurement := got.Image.LaunchDigests()[0].Digest
+			gotRTMRs := got.Image.RTMRs()
+			if got.Image.Family() != p.platform.Family() {
+				t.Errorf("image family = %s, want %s", got.Image.Family(), p.platform.Family())
+			}
+			if !bytes.Equal(gotMeasurement[:], launchDigest) {
 				t.Errorf("measurement = %x, want %x", gotMeasurement, launchDigest)
 			}
 			if (gotRTMRs != nil) != p.platform.IsTDX() {
@@ -324,9 +329,9 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementAttestsOnce(t *testing.T) {
 }
 
 // A launch with no opkeydata pubkey at all: the own measurement must still
-// resolve (bootDerivedValues needs it regardless of the operator key), and
-// pubErr must wrap ErrNoOperatorKey rather than failing the whole call.
-func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
+// resolve, and OperatorKeyErr must wrap ErrNoOperatorKey rather than failing
+// the whole call.
+func TestLoadMeasuredIdentityNonOperatorBoot(t *testing.T) {
 	for _, p := range combinedPlatforms {
 		t.Run(p.name, func(t *testing.T) {
 			stageOperatorPubkey(t, nil)
@@ -335,47 +340,49 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 			r.binding = make([]byte, len(r.binding)) // keyless launch: zero binding
 			url := stubAttester(t, r).URL()
 
-			pub, pubErr, measurement, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, url)
+			got, err := LoadMeasuredIdentity(context.Background(), p.name, url)
 			if err != nil {
 				t.Fatalf("unexpected hard error: %v", err)
 			}
-			if !errors.Is(pubErr, ErrNoOperatorKey) {
-				t.Errorf("pubErr = %v, want errors.Is(..., ErrNoOperatorKey)", pubErr)
+			if !errors.Is(got.OperatorKeyErr, ErrNoOperatorKey) {
+				t.Errorf("got.OperatorKeyErr = %v, want errors.Is(..., ErrNoOperatorKey)", got.OperatorKeyErr)
 			}
-			if pub != nil {
-				t.Errorf("pub = %v, want nil", pub)
+			if got.OperatorKey != nil {
+				t.Errorf("got.OperatorKey = %v, want nil", got.OperatorKey)
 			}
-			if !bytes.Equal(measurement, launchDigest) {
+			measurement := got.Image.LaunchDigests()[0].Digest
+			if !bytes.Equal(measurement[:], launchDigest) {
 				t.Errorf("measurement = %x, want %x — own measurement must resolve on a non-operator boot too", measurement, launchDigest)
 			}
 		})
 	}
 }
 
-// A staged pubkey the launch did not bind: pubErr must carry the mismatch
+// A staged pubkey the launch did not bind: OperatorKeyErr carries the mismatch
 // (not ErrNoOperatorKey), while the own measurement still resolves from the
 // one self-report already made.
-func TestLoadMeasuredOperatorKeyAndOwnMeasurementSubstitutedKey(t *testing.T) {
+func TestLoadMeasuredIdentitySubstitutedKey(t *testing.T) {
 	for _, p := range combinedPlatforms {
 		t.Run(p.name, func(t *testing.T) {
 			stageOperatorPubkey(t, []byte("a different key the host swapped in"))
 			launchDigest := fill(0xef)
 			url := stubAttester(t, operatorReport(p.platform, launchDigest)).URL()
 
-			gotPub, pubErr, measurement, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, url)
+			got, err := LoadMeasuredIdentity(context.Background(), p.name, url)
 			if err != nil {
 				t.Fatalf("unexpected hard error: %v", err)
 			}
-			if pubErr == nil {
-				t.Fatal("want pubErr set for a binding mismatch")
+			if got.OperatorKeyErr == nil {
+				t.Fatal("want got.OperatorKeyErr set for a binding mismatch")
 			}
-			if errors.Is(pubErr, ErrNoOperatorKey) {
-				t.Errorf("pubErr = %v, must NOT be classified as absent (a substituted key must fail closed)", pubErr)
+			if errors.Is(got.OperatorKeyErr, ErrNoOperatorKey) {
+				t.Errorf("got.OperatorKeyErr = %v, must NOT be classified as absent (a substituted key must fail closed)", got.OperatorKeyErr)
 			}
-			if gotPub != nil {
-				t.Errorf("pub = %v, want nil", gotPub)
+			if got.OperatorKey != nil {
+				t.Errorf("got.OperatorKey = %v, want nil", got.OperatorKey)
 			}
-			if !bytes.Equal(measurement, launchDigest) {
+			measurement := got.Image.LaunchDigests()[0].Digest
+			if !bytes.Equal(measurement[:], launchDigest) {
 				t.Errorf("measurement = %x, want %x", measurement, launchDigest)
 			}
 		})
@@ -384,12 +391,12 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementSubstitutedKey(t *testing.T) {
 
 // The hard-fail path: this guest's own measurement cannot be resolved, which
 // must fail the whole call even though a valid operator key was staged.
-func TestLoadMeasuredOperatorKeyAndOwnMeasurementFailsClosedOnUnresolvableMeasurement(t *testing.T) {
+func TestLoadMeasuredIdentityFailsClosedOnUnresolvableMeasurement(t *testing.T) {
 	for _, platform := range []string{"sev-snp", "no-such-platform"} {
 		t.Run("configured family "+platform, func(t *testing.T) {
 			stageOperatorPubkey(t, operatorPub)
 			url := stubAttester(t, operatorReport(teetypes.PlatformTDX, fill(0xaa))).URL()
-			if _, _, _, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), platform, url); err == nil || !strings.Contains(err.Error(), platform) {
+			if _, err := LoadMeasuredIdentity(context.Background(), platform, url); err == nil || !strings.Contains(err.Error(), platform) {
 				t.Fatalf("want configured-family refusal naming %q, got %v", platform, err)
 			}
 		})
@@ -399,14 +406,14 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementFailsClosedOnUnresolvableMeasur
 		r := operatorReport(teetypes.PlatformTDX, fill(0xaa))
 		r.rtmr2 = nil
 		url := stubAttester(t, r).URL()
-		if _, _, _, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), "tdx", url); err == nil {
+		if _, err := LoadMeasuredIdentity(context.Background(), "tdx", url); err == nil {
 			t.Fatal("want an error when this guest's own launch measurement cannot be resolved")
 		}
 	})
 
 	t.Run("attestation-api unreachable", func(t *testing.T) {
 		stageOperatorPubkey(t, operatorPub)
-		if _, _, _, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), "sev-snp", "http://127.0.0.1:1"); err == nil {
+		if _, err := LoadMeasuredIdentity(context.Background(), "sev-snp", "http://127.0.0.1:1"); err == nil {
 			t.Fatal("want an error when the attestation-api is unreachable")
 		}
 	})

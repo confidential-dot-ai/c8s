@@ -85,7 +85,7 @@ func TestEncryptMatchesRawXTSPerSectorTweak(t *testing.T) {
 		t.Fatalf("xts: %v", err)
 	}
 	want := make([]byte, len(plain))
-	for s := 0; s < 3; s++ {
+	for s := range 3 {
 		lo, hi := s*SectorSize, (s+1)*SectorSize
 		c.Encrypt(want[lo:hi], plain[lo:hi], uint64(s))
 	}

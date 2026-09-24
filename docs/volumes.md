@@ -8,6 +8,10 @@ This complements [`secrets.md`](secrets.md) — a volume key *is* a secret, stor
 and released by exactly the machinery described there. What is new is the
 artifact the key opens, and the fact that it persists.
 
+For plain unencrypted PVCs, the node image's default `local-path`
+StorageClass provisions dynamically — see
+[cluster storage](../node-guest-image/README.md#cluster-storage).
+
 ## Why a volume is different from a secret
 
 Every other value c8s protects is RAM-resident and dies with the pod. A volume
@@ -212,9 +216,9 @@ equivalent to handing over the plaintext, permanently.
 
 ## Placing the image on a node
 
-The image is ciphertext. Copy it to the node by any means, including through the
-untrusted host — that the host holds the bytes is the design premise, not a
-compromise of it.
+The image is ciphertext. Copy it to storage accessible to the hypervisor,
+including on the untrusted host — that the host holds the bytes is the design
+premise, not a compromise of it.
 
 Attach it as a **raw block device** whose disk serial is `c8s-vol-<name>`. The
 node reads that serial from `<dev>/serial` (virtio-blk) or from VPD page 0x80 at
@@ -224,18 +228,57 @@ A confos node has no persistent writable storage — the root overlay is
 reformatted on every boot — so a volume must be its own device rather than a
 file on the node's filesystem.
 
-How the device is produced depends on the hypervisor:
+### QEMU/KVM: cold-plug at launch
 
-| | |
-|---|---|
-| QEMU/KVM | `-device virtio-blk,drive=…,serial=c8s-vol-<name>` |
-| cannot set a serial | `c8s volume attach <name> --image <path>`, on the node, as root |
+For a volume named `weights`, add these arguments to the VM's QEMU launch
+command. The image path is on the **hypervisor host**:
 
-Hyper-V exposes no virtio bus at all, and a cloud disk's serial belongs to the
-provider, so on those nodes there is nothing to set. `attach` drives LIO's
-loopback target instead — a local SCSI disk whose unit serial is ours to choose.
-`c8s volume detach <name>` removes it again, leaving the ciphertext and the key
-where they are.
+```sh
+-drive if=none,id=volweights,file=/srv/c8s/weights.img,format=raw \
+-device virtio-blk-pci,drive=volweights,serial=c8s-vol-weights
+```
+
+This is **cold-plug only** on the c8s node image. Its kernel has PCI hotplug
+disabled, so `device_add virtio-blk-pci` cannot hot-attach a disk, even with a
+PCIe root port.
+
+### QEMU/KVM: hot-attach over virtio-scsi
+
+Provision a virtio-scsi controller **at VM launch** by adding:
+
+```sh
+-device virtio-scsi-pci,id=scsi0
+```
+
+Then run these commands in the running VM's **QEMU human monitor (HMP)** on
+the hypervisor host, after copying the ciphertext there:
+
+```text
+drive_add 0 if=none,id=volweights,file=/srv/c8s/weights.img,format=raw
+device_add scsi-hd,id=weights,bus=scsi0.0,drive=volweights,serial=c8s-vol-weights
+```
+
+If the VM already has a virtio-scsi controller, use its bus in place of
+`scsi0.0`. The guest discovers the new SCSI disk on the existing controller;
+this does not require PCI hotplug or a guest shell. volumed reads its serial
+from VPD page 0x80. See QEMU's [virtio-scsi overview](https://www.qemu.org/2021/01/19/virtio-blk-scsi-configuration/)
+and [monitor reference](https://www.qemu.org/docs/master/system/monitor.html).
+If `device_add` fails after `drive_add` succeeds, remove the unused backend
+with `drive_del volweights` before retrying.
+
+### Other Linux nodes: LIO fallback
+
+Where the hypervisor cannot set the serial, `c8s volume attach <name> --image
+<path>` can create a local SCSI disk through LIO's loopback target. Run it as
+root **inside the node**, with the ciphertext at that guest path, configfs
+mounted, and the `target_core_mod`, `target_core_file`, and `tcm_loop` modules
+available. `c8s volume detach <name>` removes that disk, leaving the ciphertext
+and key where they are.
+
+**This fallback is unsupported on the c8s node image:** it omits LIO support
+(`CONFIG_TARGET_CORE`) and disables module loading after boot. Release images
+also provide no supported root shell for invoking it. Use the hypervisor
+attachment recipes above for c8s QEMU/KVM nodes.
 
 The serial is a **selector, not a trust input**. The host chooses it and answers
 the query per read. Pointing a pod at the wrong device fails closed: the wrong
@@ -243,8 +286,16 @@ key produces noise — verity refuses it, or nothing will mount it.
 
 ### Replacing an image
 
-`attach` hands LIO the file, and the kernel resolves the path once. Replace an
-image with **`detach` → overwrite → `attach`**, never in place: a `kubectl cp`,
+First stop consuming workloads and let volumed release their mappings.
+For hypervisor-attached disks, disconnect the device and its backing image
+through the hypervisor before replacing the file, then reconnect it with the
+same serial. Shutting down the guest and exiting the QEMU process before
+replacement also releases the backing file; pausing the VM does not.
+`c8s volume detach` only manages LIO disks.
+
+On nodes using the LIO fallback, `attach` hands LIO the file, and the kernel
+resolves the path once. Replace an image with **`detach` → overwrite → `attach`**,
+never in place: a `kubectl cp`,
 or any `mv` into position, leaves a new file at the path while the device keeps
 serving the one the attach opened. `md5sum` on the node then matches the source
 while every read from the pod fails, because they are reading different files.
@@ -273,6 +324,23 @@ host-written. `create` prints an exact-path grant for this reason.
 
 `read` only. Writability is a property of the volume, not the grant: a write
 grant says nothing about whether a workload may see the plaintext.
+
+## The mount policy
+
+Every container in the entry also needs a `mounts` policy admitting what the
+webhook injects, exactly as in
+[`secrets.md`](secrets.md#the-mount-policy) — for a volume consumer that is the
+cert volume plus each opened volume at `<volume-dir>/<NAME>`:
+
+```json
+"mounts": {"policy": "any"}
+```
+
+An opened volume classes as a `data` mount, whose `exact` rules sit below
+`/mnt/c8s-data/`, so pinning one means putting the volume dir there with
+`confidential.ai/c8s-volume-dir`. Its rule,
+`{"destination": "/mnt/c8s-data/<NAME>", "kind": "data"}`, joins the cert
+volume's in the same `exact` policy.
 
 ## Consuming a volume
 
@@ -392,7 +460,8 @@ and volumed's reaper closes it within a sweep interval.
 Rebooting or replacing the node clears them too — device-mapper state does not
 survive a reboot.
 
-**A leftover LIO backstore is not that.** `c8s volume attach` is operator-driven
+**On nodes using the LIO fallback, a leftover backstore is separate.**
+`c8s volume attach` is operator-driven
 and outside the release lifecycle, so uninstall leaves it alone by design; a
 node that has had volumes attached still lists them afterwards. The two look
 alike on the node and are told apart by what lists them: a leaked mapping shows

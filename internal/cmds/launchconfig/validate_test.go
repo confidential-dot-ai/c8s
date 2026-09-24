@@ -17,6 +17,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 )
 
 func TestValidateRejectsEachMalformedField(t *testing.T) {
@@ -170,16 +172,16 @@ func TestVerifyRejectsBadConfigBeforeReadingFiles(t *testing.T) {
 		t.Fatal("missing signature file accepted")
 	}
 
-	old := loadMeasuredOperatorKeyAndOwnMeasurement
-	t.Cleanup(func() { loadMeasuredOperatorKeyAndOwnMeasurement = old })
-	loadMeasuredOperatorKeyAndOwnMeasurement = func(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
-		return nil, nil, nil, nil, errors.New("attestation-api unreachable")
+	old := loadMeasuredIdentity
+	t.Cleanup(func() { loadMeasuredIdentity = old })
+	loadMeasuredIdentity = func(context.Context, string, string) (credrelease.MeasuredIdentity, error) {
+		return credrelease.MeasuredIdentity{}, errors.New("attestation-api unreachable")
 	}
 	if _, err := Verify(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "verify this boot's identity") {
 		t.Fatalf("self-report failure: %v", err)
 	}
-	loadMeasuredOperatorKeyAndOwnMeasurement = func(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
-		return []byte("not a key"), nil, mustDecodeHex(doc.Image.Measurement), nil, nil
+	loadMeasuredIdentity = func(context.Context, string, string) (credrelease.MeasuredIdentity, error) {
+		return testMeasuredIdentity(t, doc, "not a key"), nil
 	}
 	if _, err := Verify(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "measured launch key") {
 		t.Fatalf("malformed measured key: %v", err)
@@ -207,8 +209,13 @@ func TestLoadStagedTrustsOnlyCompleteArtifacts(t *testing.T) {
 	if _, err := LoadStaged(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("loaded a missing artifact")
 	}
-	if _, err := LoadStaged(write(t, []byte(`{"schemaVersion":"c8s-launch/v2","unknown":1}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
+	if _, err := LoadStaged(write(t, []byte(`{"schema_version":"c8s-launch/v2","unknown":1}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
 		t.Errorf("unknown field: %v", err)
+	}
+	// The staged artifact is JSON, so its camelCase YAML spelling is an
+	// unknown field here: a decoder that accepted both would not be strict.
+	if _, err := LoadStaged(write(t, []byte(`{"schemaVersion":"c8s-launch/v2"}`))); err == nil || !strings.Contains(err.Error(), "decode staged") {
+		t.Errorf("camelCase staged field: %v", err)
 	}
 	if _, err := LoadStaged(write(t, append(encode(t, doc), []byte("{}")...))); err == nil || !strings.Contains(err.Error(), "trailing data") {
 		t.Errorf("trailing data: %v", err)
@@ -295,9 +302,9 @@ func TestVerifyPassesTheFamilyNameToTheSelfReport(t *testing.T) {
 		t.Run(platform, func(t *testing.T) {
 			doc, key, pub := testDocument(t, platform, Server)
 			testLoader(t, doc, pub)
-			inner := loadMeasuredOperatorKeyAndOwnMeasurement
+			inner := loadMeasuredIdentity
 			var got string
-			loadMeasuredOperatorKeyAndOwnMeasurement = func(ctx context.Context, platform, api string) ([]byte, error, []byte, map[int][]byte, error) {
+			loadMeasuredIdentity = func(ctx context.Context, platform, api string) (credrelease.MeasuredIdentity, error) {
 				got = platform
 				return inner(ctx, platform, api)
 			}

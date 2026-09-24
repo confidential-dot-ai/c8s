@@ -11,7 +11,10 @@
 // `c8s install` subcommand that consumes it.
 package helmchart
 
-import "embed"
+import (
+	"embed"
+	"strings"
+)
 
 // ChartFS contains the full chart tree including dotfiles and underscored
 // template partials (_helpers.tpl).
@@ -22,3 +25,13 @@ var ChartFS embed.FS
 // ChartRoot is the path prefix inside ChartFS that a helm action expects as
 // a chart directory.
 const ChartRoot = "c8s"
+
+// HostSweepScript is the uninstall host sweep script, normalized the way the
+// chart's argv pin renders it (trailing newlines collapsed to one).
+func HostSweepScript() string {
+	b, err := ChartFS.ReadFile(ChartRoot + "/files/scripts/host-sweep.sh")
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimRight(string(b), "\n") + "\n"
+}

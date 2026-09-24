@@ -22,7 +22,6 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -173,7 +172,7 @@ func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformTDX,
-		ReportDataMatch: teetypes.Ptr(true),
+		ReportDataMatch: new(true),
 		Claims: teetypes.Claims{
 			LaunchDigest: hex.EncodeToString(mrtd[:]),
 			PlatformData: map[string]any{
@@ -223,7 +222,7 @@ func TestVerifyServerCertRejectsBadReportData(t *testing.T) {
 	// the cert key — a MITM presenting someone else's quote. Must fail closed.
 	exp := testPolicy(t, operatorPub(t))
 	res := verifiedResultFor(exp)
-	res.ReportDataMatch = teetypes.Ptr(false)
+	res.ReportDataMatch = new(false)
 	stubVerify(t, res, nil)
 	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
@@ -409,7 +408,7 @@ func snpResultFor(t *testing.T, exp measuredPolicy, smp int) *teetypes.Verificat
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformSNP,
-		ReportDataMatch: teetypes.Ptr(true),
+		ReportDataMatch: new(true),
 		Claims: teetypes.Claims{
 			LaunchDigest: hex.EncodeToString(digest[:]),
 			InitData:     teetypes.HexBytes(expectedHostData(exp)),
@@ -625,7 +624,7 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 		},
 		"report_data not bound": func() (*teetypes.VerificationResult, error) {
 			r := snpResultFor(t, exp, 2)
-			r.ReportDataMatch = teetypes.Ptr(false)
+			r.ReportDataMatch = new(false)
 			return r, nil
 		},
 		"another operator key's HOSTDATA": func() (*teetypes.VerificationResult, error) {

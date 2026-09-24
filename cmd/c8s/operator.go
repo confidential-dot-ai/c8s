@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -90,7 +89,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
-	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to the CDS identity policy propagated whole to injected sidecars, including image, RTMR and operator key pins. Cannot be combined with --cds-measurements or --cds-rtmrs")
+	cmdsutil.BindImagePolicyFlags(operatorCmd.Flags(), &cdsMeasurementsConfig, nil, "", "propagates the complete CDS identity policy to injected sidecars; excludes --cds-measurements and --cds-rtmrs")
 	operatorCmd.Flags().StringSliceVar(&cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for SNP evidence, empty pins no registers)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")
@@ -111,10 +110,8 @@ func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, e
 	if path == "" {
 		return "", nil
 	}
-	if len(digests) != 0 || len(rtmrs) != 0 {
-		return "", fmt.Errorf("--measurements-config cannot be combined with --cds-measurements or --cds-rtmrs")
-	}
-	pins, err := cmdsutil.LoadMeasurementsSource(path, "")
+	pins, err := (cmdsutil.ImagePolicySource{File: path}).LoadValues(
+		cmdsutil.MeasurementPins{Measurements: digests, Registers: rtmrs, Prefix: "cds-"})
 	if err != nil {
 		return "", err
 	}

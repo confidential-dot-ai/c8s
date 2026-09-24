@@ -7,14 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/helmchart"
-
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 func TestBuildHelmUninstallArgs(t *testing.T) {
@@ -311,6 +310,8 @@ func TestHostSweepDaemonSetShape(t *testing.T) {
 		NriCacheDir:         "/var/lib/nri-image-policy",
 		ImagePullSecretRef:  []string{"regcred"},
 	}
+	cfg.SweepArgv = []string{"/bin/sh", "-c", hostSweepScript}
+	cfg.PauseArgv = []string{"/bin/sleep", "2147483647"}
 	ds := hostSweepDaemonSet("c8s", "c8s-system", cfg)
 
 	if ds.Name != "c8s-host-sweep" || ds.Namespace != "c8s-system" {
@@ -348,8 +349,13 @@ func TestHostSweepDaemonSetShape(t *testing.T) {
 	if sweep.Image != cfg.SweepImage {
 		t.Errorf("sweep image = %q, want %q", sweep.Image, cfg.SweepImage)
 	}
-	if len(sweep.Args) != 1 || sweep.Args[0] != hostSweepScript {
-		t.Error("sweep container args do not carry the embedded host-sweep.sh")
+	if !reflect.DeepEqual(sweep.Command, []string{"/bin/sh", "-c", hostSweepScript}) || len(sweep.Args) != 0 {
+		t.Errorf("sweep argv = %v + %v, want [/bin/sh -c host-sweep.sh]", sweep.Command, sweep.Args)
+	}
+	pause := pod.Containers[0]
+	// The pin's other copy of this literal lives in c8s.argvPinnedEntries.
+	if !reflect.DeepEqual(pause.Command, []string{"/bin/sleep", "2147483647"}) || len(pause.Args) != 0 {
+		t.Errorf("pause argv = %v + %v, want [/bin/sleep 2147483647]", pause.Command, pause.Args)
 	}
 	// The script's env contract (see host-sweep.sh header) — every value the
 	// release config carries must be plumbed.
@@ -417,6 +423,8 @@ nriImagePolicy:
 		Distro:              "rke2",
 		ContainerdConfigDir: "/var/lib/rancher/rke2/agent/etc/containerd",
 		SweepImage:          "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
+		SweepArgv:           []string{"/bin/sh", "-c", hostSweepScript},
+		PauseArgv:           []string{"/bin/sleep", "2147483647"},
 		// The host paths fall back to the chart defaults when absent.
 		NriPluginDir:      "/opt/nri/plugins",
 		NriPluginFilename: "10-nri-image-policy",

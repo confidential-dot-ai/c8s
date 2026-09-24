@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/google/go-sev-guest/verify/trust"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -48,7 +48,7 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 	if platform != "az-snp" {
 		t.Fatalf("platform = %q, want az-snp", platform)
 	}
-	anchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("challenge")}}
+	anchor := Params{ExpectedReportData: []byte("challenge")}
 
 	res, err := Verify(context.Background(), platform, evidence, anchor)
 	if err != nil {
@@ -71,9 +71,59 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 		t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
 	}
 
-	wrongAnchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("not-the-nonce")}}
+	wrongAnchor := Params{ExpectedReportData: []byte("not-the-nonce")}
 	if _, err := Verify(context.Background(), platform, evidence, wrongAnchor); err == nil {
 		t.Fatal("a wrong binding anchor must fail closed")
+	}
+}
+
+func TestDefaultKDSCacheDir_EnvOverrideAndDisable(t *testing.T) {
+	t.Setenv(kdsCacheDirEnv, "/tmp/c8s-kds-test")
+	if got := defaultKDSCacheDir(); got != "/tmp/c8s-kds-test" {
+		t.Fatalf("override: got %q", got)
+	}
+	t.Setenv(kdsCacheDirEnv, "")
+	if got := defaultKDSCacheDir(); got != "" {
+		t.Fatalf("empty override must disable the cache, got %q", got)
+	}
+}
+
+type kdsGetterFunc func(string) ([]byte, error)
+
+func (f kdsGetterFunc) Get(url string) ([]byte, error) { return f(url) }
+
+// Verify must reuse collateral across calls when c8s configures the shared cache.
+func TestVerify_ReusesCachedVCEK(t *testing.T) {
+	parts := loadGenoaParts(t)
+	vcek := parts.vcek
+	parts.vcek = nil
+	evidence := parts.evidence(t)
+	t.Setenv(kdsCacheDirEnv, t.TempDir())
+
+	calls := 0
+	orig := kdsGetter
+	t.Cleanup(func() { kdsGetter = orig })
+	kdsGetter = func() trust.HTTPSGetter {
+		return kdsGetterFunc(func(string) ([]byte, error) {
+			calls++
+			if calls > 1 {
+				return nil, errors.New("KDS unavailable")
+			}
+			return vcek, nil
+		})
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		res, err := Verify(context.Background(), "snp", evidence, Params{})
+		if err != nil {
+			t.Fatalf("verification %d: %v", attempt, err)
+		}
+		if !res.SignatureValid {
+			t.Fatalf("verification %d: signature_valid must be true", attempt)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("KDS fetched %d times, want 1", calls)
 	}
 }
 
@@ -82,6 +132,8 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 // CollateralError — no verdict — and returns promptly. A cancelled context
 // aborts http before any I/O, so no network is touched.
 func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
+	// This test needs a fetch even if the user already cached the fixture's VCEK.
+	t.Setenv(kdsCacheDirEnv, "")
 	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
 	var inner struct {
 		AttestationReport string `json:"attestation_report"`
@@ -101,8 +153,7 @@ func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("expired ctx took %v, want prompt return", elapsed)
 	}
-	var ce *CollateralError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CollateralError](err); !ok {
 		t.Fatalf("KDS fetch failure must classify as CollateralError, got: %v", err)
 	}
 }

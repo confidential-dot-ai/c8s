@@ -3,6 +3,7 @@ package cds
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"testing"
 
@@ -54,9 +55,7 @@ func (s fakeStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 // digest.
 func (s fakeStore) allWorkloads() map[string]pkgallowlist.Workload {
 	out := make(map[string]pkgallowlist.Workload, len(s.workloads)+len(s.anyArgv))
-	for name, w := range s.workloads {
-		out[name] = w
-	}
+	maps.Copy(out, s.workloads)
 	for d := range s.anyArgv {
 		digest, err := types.ParseDigest(d)
 		if err != nil {

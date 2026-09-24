@@ -1,14 +1,71 @@
 package nriimagepolicy
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/containerd/nri/pkg/api"
+
+	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
+
+func TestInventoryPreservesUnavailableMountEvidence(t *testing.T) {
+	digest, err := types.ParseDigest(digestApp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		pod  *api.PodSandbox
+	}{
+		{name: "missing pod metadata"},
+		{name: "observed empty spec", pod: &api.PodSandbox{Id: "pod", Uid: "uid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &plugin{inventory: newAdmissionInventory(t.TempDir())}
+			ctr := &api.Container{Id: "ctr", PodSandboxId: "pod", Args: []string{"/app"}}
+			p.recordDigest(ctr, digestApp, observedMounts(tc.pod, ctr))
+			_, reported, known, err := p.inventory.DigestsForSandbox("pod")
+			if err != nil || !known || len(reported) != 1 {
+				t.Fatalf("inventory = %+v, %v, %v", reported, known, err)
+			}
+			// Exercise the wire representation consumed by secret release too.
+			wire, err := json.Marshal(reported)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded []workloadclaims.SandboxContainer
+			if err := json.Unmarshal(wire, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			for _, policy := range []string{allowlist.PolicyDeny, allowlist.PolicyExact} {
+				al := &allowlist.Allowlist{Workloads: map[string]allowlist.Workload{
+					"app": {Containers: []allowlist.Container{{Digest: digest,
+						Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/app"}},
+						Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny},
+						Env:     allowlist.EnvPolicy{Policy: allowlist.PolicyAny},
+						Mounts:  allowlist.MountPolicy{Policy: policy},
+					}}},
+				}}
+				_, _, err := al.MatchWorkload(secrets.WorkloadContainers(al, decoded))
+				if tc.pod == nil && !errors.Is(err, allowlist.ErrNoMatch) {
+					t.Fatalf("%s accepted unavailable mount evidence: %v", policy, err)
+				}
+				if tc.pod != nil && err != nil {
+					t.Fatalf("%s refused observed empty mounts: %v", policy, err)
+				}
+			}
+		})
+	}
+}
 
 // sandboxDigestsFor walks the production path CDS drives: bind the caller by
 // kernel credentials to its sandbox, then list what that sandbox runs.

@@ -17,12 +17,11 @@ import (
 )
 
 const (
-	serverMarker        = "/run/confos/role-server"
-	agentMarker         = "/run/confos/role-agent"
-	serverTokenPath     = "/run/confos/rke2-server-token"
-	agentTokenPath      = "/run/confos/rke2-agent-token"
-	rke2FragmentPath    = "/etc/rancher/rke2/config.yaml.d/50-role.yaml"
-	runtimeManifestPath = "/var/lib/rancher/rke2/server/manifests/c8s-node-runtime.yaml"
+	serverMarker     = "/run/confos/role-server"
+	agentMarker      = "/run/confos/role-agent"
+	serverTokenPath  = "/run/confos/rke2-server-token"
+	agentTokenPath   = "/run/confos/rke2-agent-token"
+	rke2FragmentPath = "/etc/rancher/rke2/config.yaml.d/50-role.yaml"
 )
 
 // Stage authenticates the launch document and writes only fixed boot paths.
@@ -52,10 +51,13 @@ func clearOutputs(cfg Config) error {
 	// Clear authorization verdicts first, even when removing another stale
 	// output fails. Collect errors so a blocked first marker never prevents
 	// attempting to remove the other.
-	// The locally generated agent token belongs to the running cluster. Keep
-	// it across retries, including failed verification; role gates still close.
+	//
+	// The agent token is never a staged input: the server generates it in
+	// RAM on first staging and it belongs to the running cluster, so it is
+	// kept across restaging, including a failed verification. The role gates
+	// still close, so nothing can use it until the document verifies again.
 	var errs []error
-	paths := []string{serverMarker, agentMarker, serverTokenPath, rke2FragmentPath, runtimeManifestPath}
+	paths := []string{serverMarker, agentMarker, serverTokenPath, rke2FragmentPath}
 	for _, name := range []string{"peers.json", "cds.json", "agents.json", "operator-pubkey", "config.json", "workloads.json"} {
 		paths = append(paths, Dir+"/"+name)
 	}
@@ -117,18 +119,15 @@ func stageVerified(cfg Config, v *Verified) error {
 	}
 	marker := agentMarker
 	if doc.Role == Server {
-		manifest, err := runtimeManifest(doc, cds)
-		if err != nil {
-			return err
-		}
+		// RKE2 generates its privileged server token itself; the separate
+		// agent token is minted here so it can never alias the server one.
 		if err := initializeAgentToken(cfg.path(agentTokenPath)); err != nil {
 			return err
 		}
-		outputs = append(outputs, outputFile{runtimeManifestPath, manifest})
+		// Agents enroll over attested TLS against this policy: every image and
+		// launch-key tuple the signed document authorizes, minus the server's.
 		if len(v.pins.Images) > 1 {
-			agents, err := refvalues.Format(refvalues.ReferenceValues{
-				Family: v.pins.Family, Images: v.pins.Images[1:],
-			})
+			agents, err := refvalues.Format(refvalues.ReferenceValues{Family: v.pins.Family, Images: v.pins.Images[1:]})
 			if err != nil {
 				return fmt.Errorf("format agent enrollment policy: %w", err)
 			}
@@ -138,7 +137,8 @@ func stageVerified(cfg Config, v *Verified) error {
 	}
 	for _, out := range outputs {
 		path := cfg.path(out.path)
-		// /run/confos/launch contains the authenticated public boot policy.
+		// /run/confos/launch holds the authenticated boot policy, never a
+		// credential from launch media.
 		// Existing parent directories retain their established permissions.
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("create output parent: %w", err)
@@ -163,32 +163,13 @@ type roleFragment struct {
 func rke2Fragment(doc *Document) roleFragment {
 	out := roleFragment{TokenFile: agentTokenPath, NodeName: doc.Node.Name, NodeIP: doc.Node.IP, NodeExternalIP: doc.Node.ExternalIP}
 	if doc.Role == Server {
-		// Omit token-file so RKE2 generates its privileged token inside the guest.
+		// No token-file: RKE2 generates its privileged token inside the guest.
 		out.TokenFile = ""
 		out.AgentTokenFile = agentTokenPath
 	} else {
 		out.Server = "https://" + doc.Server.Address + ":9345"
 	}
 	return out
-}
-
-func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
-	manifest := struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
-		Metadata   struct {
-			Name      string `yaml:"name"`
-			Namespace string `yaml:"namespace"`
-		} `yaml:"metadata"`
-		Data map[string]string `yaml:"data"`
-	}{APIVersion: "v1", Kind: "ConfigMap", Data: map[string]string{"cds-url": doc.CDSURL(), "cds.json": string(cds)}}
-	manifest.Metadata.Name = "c8s-node-runtime"
-	manifest.Metadata.Namespace = "c8s-system"
-	out, err := yaml.Marshal(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("encode node runtime ConfigMap: %w", err)
-	}
-	return out, nil
 }
 
 // chooseHostInterface is a package var so tests can fake the host's routes.

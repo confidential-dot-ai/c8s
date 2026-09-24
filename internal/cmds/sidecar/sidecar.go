@@ -16,7 +16,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -56,8 +55,7 @@ func (c Config) Endpoint() string {
 // shape also moves the volume daemon onto guest loopback) overrides the
 // affected flag's Usage via f.Lookup after this call.
 func BindFlags(f *pflag.FlagSet, cfg *Config) {
-	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "path to the complete CDS image and operator identity policy")
-	f.StringVar(&cfg.MeasurementsConfigJSON, "measurements-config-json", "", "inline complete CDS image and operator identity policy")
+	cmdsutil.BindImagePolicyFlags(f, &cfg.MeasurementsConfig, &cfg.MeasurementsConfigJSON, "", "pins the CDS endpoint; excludes --measurements and --rtmrs")
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
@@ -97,27 +95,14 @@ func (c *Config) Validate() error {
 
 // ParsePins decodes --measurements and --rtmrs, warning when measurements are unpinned.
 func (c *Config) ParsePins() (ratls.Pins, error) {
-	if c.MeasurementsConfig != "" || c.MeasurementsConfigJSON != "" {
-		if len(c.Measurements) != 0 || len(c.RTMRs) != 0 {
-			return ratls.Pins{}, fmt.Errorf("a measurements config cannot be combined with --measurements or --rtmrs")
-		}
-		set, err := cmdsutil.LoadMeasurementsSource(c.MeasurementsConfig, c.MeasurementsConfigJSON)
-		if err != nil {
-			return ratls.Pins{}, err
-		}
-		return ratls.Pins(set.Policy()), nil
-	}
-	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
+	policy, err := (cmdsutil.ImagePolicySource{File: c.MeasurementsConfig, JSON: c.MeasurementsConfigJSON}).Load(
+		cmdsutil.MeasurementPins{Measurements: c.Measurements, Registers: c.RTMRs})
 	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
+		return ratls.Pins{}, err
 	}
-	cmdsutil.WarnIfCDSUnpinned(len(measurements),
+	cmdsutil.WarnIfCDSUnpinned(len(policy.Measurements)+len(policy.Images),
 		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development.")
-	rtmrs, err := refvalues.ParseRTMRPins(c.RTMRs)
-	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
-	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	return ratls.Pins(policy), nil
 }
 
 // Terminal marks a non-nil error no later attempt can clear, so Retry stops on
@@ -145,8 +130,7 @@ func Retry(ctx context.Context, cfg Config, what string, attempt func(context.Co
 			return nil
 		}
 		lastErr = err
-		var t terminal
-		if errors.As(err, &t) {
+		if _, ok := errors.AsType[terminal](err); ok {
 			slog.Error(what+" release cannot succeed", "attempt", n, "of", cfg.Attempts, "error", err)
 			return err
 		}

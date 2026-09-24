@@ -9,7 +9,7 @@ inputs:
     description: 'Use the already validated exact-image evidence in RUNNER_TEMP.'
     default: 'false'
   c8s_ref:
-    description: 'Optional staged-stack CLI override; empty for exact acceptance.'
+    description: 'c8s ref to test; empty uses the checked-out HEAD. Requires the node image built from that commit. Empty for automatic acceptance.'
     default: ''
   keep_cvm:
     description: 'Keep the CVM for staged-run debugging.'
@@ -51,7 +51,7 @@ runs:
         # `|| true`: under `set -e` a failed substitution exits before the
         # pinned fallback on the next line can be reached.
         GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
-        [ -n "$GOVER" ] || GOVER=1.26.3
+        [ -n "$GOVER" ] || GOVER=1.27.1
         retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
         sudo tar -C /usr/local -xzf /tmp/go.tar.gz
       fi
@@ -108,6 +108,24 @@ runs:
           echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
         fi
       done
+      # Shared roots outlive a run. Preserve VM references too, including
+      # stopped VMs; a failed inventory lookup never authorizes deletion.
+      if vmis=$(kubectl -n "$NS" get vmi -o json) &&
+         vms=$(kubectl -n "$NS" get vm -o json) &&
+         inuse=$(jq -nr --argjson vmis "$vmis" --argjson vms "$vms" '
+           [$vmis.items[].spec.volumes[]?, $vms.items[].spec.template.spec.volumes[]?]
+           | .[] | (.persistentVolumeClaim.claimName // .dataVolume.name // empty)'); then
+        for pvc in $(kubectl -n "$NS" get pvc -l ci.confidential.ai/managed=true,ci.confidential.ai/resource=tdx-node-root -o name); do
+          name=${pvc#persistentvolumeclaim/}
+          [[ "$name" =~ ^c8s-root-[0-9a-f]{12}$ ]] || continue
+          grep -qx "$name" <<<"$inuse" && continue
+          ct=$(kubectl -n "$NS" get "$pvc" -o jsonpath='{.metadata.creationTimestamp}')
+          age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+          [ "$age" -gt 604800 ] && { echo "reaping root disk $name (unused, ${age}s old)"; kubectl -n "$NS" delete "$pvc" --ignore-not-found --wait=false; }
+        done
+      else
+        echo "keeping shared root disks: VM inventory is unavailable"
+      fi
       exit 0
     env:
       GH_TOKEN: ${{ github.token }}
@@ -154,104 +172,18 @@ runs:
       timeout 130 kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$VM-root" --timeout=120s
       bash .github/scripts/tdx-image-acceptance.sh start-import \
         "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$VM" "$NS" "$GITHUB_REPOSITORY"
-      bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+      # The binder has done its job once the PVC is bound to the TDX node and
+      # the import is requested. CDI will not create its importer while any
+      # pod still mounts the claim (ImportTargetInUse), so release it before
+      # waiting, not after.
       bash .github/scripts/tdx-image-acceptance.sh cleanup-binder "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
-
-  - name: resolve image refs + the paired c8s ref
-    if: inputs.exact_image != 'true'
-    env:
-      C8S_REF_OVERRIDE: ${{ inputs.c8s_ref }}
-    shell: bash
-    run: |
-      set -euo pipefail
-      for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef launchConfigVersion; do
-        v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
-        [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
-        case "$k" in
-          launchConfigVersion) [[ "$v" == c8s-launch/v2 ]] ;;
-          image) [[ "$v" =~ ^ghcr[.]io/[a-zA-Z0-9_./:@-]+$ ]] ;;
-          rootPvc) [[ "$v" =~ ^[a-z0-9][a-z0-9.-]*$ ]] ;;
-          mrtd|rtmr1|rtmr2) [[ "$v" =~ ^[0-9a-f]{96}$ ]] ;;
-          c8sRef) [[ "$v" =~ ^[0-9a-f]{7,40}$ ]] ;;
-        esac || { echo "::error::$REFS_CM invalid '$k'; publish compatible signed-launch image metadata"; exit 1; }
-        echo "$k=$v" >> "$GITHUB_ENV"
-      done
-      # Optional manifest tag when the digest-to-tag lookup cannot derive it.
-      # Keep the ConfigMap fallback alongside the required image tuple.
-      v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.imageTag}' 2>/dev/null)
-      if [ -n "$v" ]; then
-        [[ "$v" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo "::error::invalid imageTag"; exit 1; }
-        echo "imageTag=$v" >> "$GITHUB_ENV"
-      fi
-      # An explicit input overrides the pin, but say so loudly: the floor is
-      # fail-closed, so an unpaired ref is the likeliest cause of a red run.
-      if [ -n "$C8S_REF_OVERRIDE" ]; then
-        [[ "$C8S_REF_OVERRIDE" =~ ^[a-zA-Z0-9_./-]+$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
-        echo "::warning title=version pairing::testing c8s_ref='$C8S_REF_OVERRIDE' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': the CLI and test source change; node services remain the pinned image"
-        echo "c8sRef=$C8S_REF_OVERRIDE" >> "$GITHUB_ENV"
-      fi
-
-  - name: preflight, the pinned ref still matches the pinned image
-    # c8sRef and image are separate CM fields, so they can drift apart with
-    # nothing to notice: a stale c8sRef built a CLI three days older than
-    # the image and failed the lane on a manifest the CLI could not parse.
-    #
-    # The image's own -cdi tags carry the c8s ref its components were baked
-    # from (c8s-image.yml passes the same SHORT_SHA to both). Reproducible
-    # builds mean one digest can hold SEVERAL such tags -- commits touching
-    # no image input produce a byte-identical image -- so agreement is
-    # "c8sRef is among them", never "equals the first one found".
-    #
-    # Advisory: an operator may deliberately pair a newer CLI with an older
-    # image, and only the baked floor can say whether that is denied.
-    continue-on-error: true
-    if: inputs.exact_image != 'true' && inputs.c8s_ref == ''
-    shell: bash
-    run: |
-      set -euo pipefail
-      repo="${image%%@*}"; repo="${repo%%:*}"
-      case "$image" in
-        *@*) want="${image#*@}" ;;
-        *)   want="$(crane digest "$image" 2>/dev/null || true)" ;;
-      esac
-      [ -n "$want" ] || { echo "could not resolve '$image' to a digest; skipping"; exit 0; }
-      matched=0; tagged=""
-      for t in $(crane ls "$repo" 2>/dev/null | grep -E '^rke2-tdx-cdi-[0-9a-f]{7,}$'); do
-        [ "$(crane digest "$repo:$t" 2>/dev/null)" = "$want" ] || continue
-        r="${t#rke2-tdx-cdi-}"
-        tagged="${tagged:+$tagged }$r"
-        [ "$r" = "$c8sRef" ] && matched=1
-      done
-      [ -n "$tagged" ] || { echo "no sha-suffixed tag points at the pinned image; nothing to compare"; exit 0; }
-      [ "$matched" = 1 ] && { echo "c8sRef '$c8sRef' matches the pinned image's build ref"; exit 0; }
-      echo "::warning title=stale c8sRef::the CM pins c8sRef='$c8sRef' but its image was built from [$tagged]. The CLI under test is not the one shipped in this image; re-seed c8sRef unless the pairing is deliberate"
-
-  - name: preflight, TDX device capacity
-    # KubeVirt's socket device-plugin probes the QGS socket ONLY at
-    # virt-handler startup and never re-checks. After a host reboot or a
-    # qgsd/bridge restart it advertises 0 forever and every TDX VM fails to
-    # schedule with a misleading "Insufficient devices". Seen in the wild
-    # 2026-07-26 on a 26h-old virt-handler while QGS was perfectly healthy.
-    # Cheap to detect here; the remedy needs cluster-scoped rights the
-    # bm-e2e SA deliberately lacks, so this reports rather than fixes.
-    shell: bash
-    run: |
-      set -uo pipefail
-      if kubectl auth can-i get nodes >/dev/null 2>&1; then
-        N=$(kubectl get node -l kubevirt.io/tdx=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/tdx}' 2>/dev/null)
-        echo "devices.kubevirt.io/tdx = ${N:-unknown}"
-        if [ "${N:-0}" = "0" ]; then
-          echo "::error title=TDX devices exhausted::virt-handler is advertising 0 TDX devices. Fix on the host: kubectl -n kubevirt rollout restart daemonset/virt-handler"
-          exit 1
-        fi
-      else
-        echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
-      fi
+      bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
 
   - name: build the c8s CLI at the paired ref
     env:
       EXACT_IMAGE: ${{ inputs.exact_image == 'true' }}
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      C8S_REF_INPUT: ${{ inputs.c8s_ref }}
     shell: bash
     run: |
       set -euo pipefail
@@ -284,22 +216,146 @@ runs:
         [ "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA" ] \
           || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
         C8S_SOURCE_DIR=$GITHUB_WORKSPACE
+      elif [ -z "${C8S_REF_INPUT:-}" ]; then
+        C8S_SOURCE_DIR=$GITHUB_WORKSPACE
       else
+        [[ "$C8S_REF_INPUT" =~ ^[a-zA-Z0-9_./][a-zA-Z0-9_./-]*$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
         clone_c8s_source() {
           rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
         }
         retry clone_c8s_source || { clone_diag; exit 1; }
-        git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+        git -C /tmp/c8s-src checkout -q "$C8S_REF_INPUT" || { echo "::error::bad c8s ref '$C8S_REF_INPUT': refusing to silently test main"; exit 1; }
         C8S_SOURCE_DIR=/tmp/c8s-src
       fi
       export C8S_SOURCE_DIR
       echo "C8S_SOURCE_DIR=$C8S_SOURCE_DIR" >> "$GITHUB_ENV"
-      echo "c8s ref sha: $(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)"
+      C8S_SHA=$(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)
+      [[ "$C8S_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source commit"; exit 1; }
+      echo "C8S_SHA=$C8S_SHA" >> "$GITHUB_ENV"
+      echo "c8sRef=${C8S_SHA:0:7}" >> "$GITHUB_ENV"
+      echo "c8s ref sha: $C8S_SHA"
       pushd "$C8S_SOURCE_DIR" >/dev/null
       retry go install ./cmd/c8s
       popd >/dev/null
       # The CLI comes from the paired source; baked services stay in the image.
       c8s --version || true
+
+  - name: resolve the node image built from the commit under test
+    if: inputs.exact_image != 'true'
+    env:
+      IMAGE_REPO: ghcr.io/confidential-dot-ai/node-guest-base
+    shell: bash
+    run: |
+      set -euo pipefail
+      # Select the published image and manifest for the actual source commit.
+      # Services are baked into the image; the CLI signs launch configuration
+      # against this manifest before the VM starts.
+      . "$GITHUB_WORKSPACE/bin/retry.sh"
+      [[ "$c8sRef" =~ ^[0-9a-f]{7}$ ]] || { echo "::error::invalid image source ref"; exit 1; }
+      tok=$(retry curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
+      accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'
+      IMG_DIGEST=""; code=""
+      for attempt in 1 2 3 4; do
+        hdr=$(curl -sI --max-time 20 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
+          "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-tdx-cdi-${c8sRef}" | tr -d '\r')
+        code=$(awk 'NR==1{print $2}' <<<"$hdr")
+        case "$code" in
+          200) IMG_DIGEST=$(awk 'tolower($1)=="docker-content-digest:"{print $2}' <<<"$hdr"); break ;;
+          404) echo "::error::no node image for the commit under test: ${IMAGE_REPO}:rke2-tdx-cdi-${c8sRef} is not published. The lane needs the exact pair; wait for this commit's c8s-image run, or dispatch with a c8s_ref whose image exists"; exit 1 ;;
+          *)   sleep $((attempt * 3)) ;;
+        esac
+      done
+      [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ghcr answered ${code:-none} for rke2-tdx-cdi-${c8sRef} on 4 attempts"; exit 1; }
+      oras=$(retry curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "Accept: $accept" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-tdx-${c8sRef}")
+      mlayer=$(jq -er '[.layers[] | select(.annotations["org.opencontainers.image.title"]=="manifest.json")] | if length == 1 then .[0].digest else error("expected one manifest.json layer") end' <<<"$oras")
+      [[ "$mlayer" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid manifest layer digest"; exit 1; }
+      retry curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$mlayer" -o /tmp/image-manifest.json
+      jq -e '.version == 3 and .build.platform == "tdx" and
+        ([.tdx.mrtd, .tdx.rtmr1, .tdx.rtmr2] | all(.[]; type == "string" and test("^[0-9a-f]{96}$")))' /tmp/image-manifest.json >/dev/null \
+        || { echo "::error::rke2-tdx-${c8sRef} manifest.json is not a TDX node image manifest"; exit 1; }
+      short12=${IMG_DIGEST#sha256:}; short12=${short12:0:12}
+      {
+        echo "image=${IMAGE_REPO}@${IMG_DIGEST}"
+        echo "rootPvc=c8s-root-${short12}"
+        echo "mrtd=$(jq -er .tdx.mrtd /tmp/image-manifest.json)"
+        echo "rtmr1=$(jq -er .tdx.rtmr1 /tmp/image-manifest.json)"
+        echo "rtmr2=$(jq -er .tdx.rtmr2 /tmp/image-manifest.json)"
+      } >> "$GITHUB_ENV"
+      echo "c8s under test ${c8sRef} on its own node image rke2-tdx-cdi-${c8sRef} (${IMG_DIGEST:0:19}...), mrtd $(jq -r '.tdx.mrtd[0:16]' /tmp/image-manifest.json)..."
+
+  - name: stage the node image on the host (no-op when already staged)
+    if: inputs.exact_image != 'true'
+    shell: bash
+    run: |
+      set -euo pipefail
+      # A CDI registry import into a PVC named by image digest, shared
+      # read-only by every run of this image. Requested through the PVC
+      # annotations CDI honours, with immediate binding so no binder pod is
+      # needed on this single-node host.
+      # API errors abort. Existing claims must identify the full selected
+      # image, not merely share its shortened name.
+      existing=$(kubectl -n "$NS" get pvc "$rootPvc" --ignore-not-found -o json)
+      if [ -n "$existing" ]; then
+        jq -e --arg image "docker://$image" '
+          .metadata.labels["ci.confidential.ai/managed"] == "true" and
+          .metadata.labels["ci.confidential.ai/resource"] == "tdx-node-root" and
+          .metadata.annotations["cdi.kubevirt.io/storage.import.endpoint"] == $image
+        ' <<<"$existing" >/dev/null || { echo "::error::existing root PVC does not match the selected image"; exit 1; }
+      else
+        kubectl create -f - <<EOF
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: $rootPvc
+        namespace: $NS
+        labels:
+          ci.confidential.ai/managed: "true"
+          ci.confidential.ai/resource: tdx-node-root
+          confai.confidential.ai/source-digest-sha256: "${rootPvc#c8s-root-}"
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+          cdi.kubevirt.io/storage.import.source: registry
+          cdi.kubevirt.io/storage.import.endpoint: "docker://$image"
+          cdi.kubevirt.io/storage.import.secretName: ghcr-pull
+          cdi.kubevirt.io/storage.contentType: kubevirt
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        volumeMode: Filesystem
+        resources: {requests: {storage: 4Gi}}
+      EOF
+      fi
+      for i in $(seq 1 120); do
+        phase=$(kubectl -n "$NS" get pvc "$rootPvc" -o jsonpath='{.metadata.annotations.cdi\.kubevirt\.io/storage\.pod\.phase}' 2>/dev/null || true)
+        case "$phase" in
+          Succeeded) echo "root disk $rootPvc ready"; break ;;
+          Failed) kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image failed"; exit 1 ;;
+        esac
+        [ "$i" -lt 120 ] || { kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image did not finish in 20 min (phase ${phase:-none})"; exit 1; }
+        sleep 10
+      done
+
+  - name: preflight, TDX device capacity
+    # KubeVirt's socket device-plugin probes the QGS socket ONLY at
+    # virt-handler startup and never re-checks. After a host reboot or a
+    # qgsd/bridge restart it advertises 0 forever and every TDX VM fails to
+    # schedule with a misleading "Insufficient devices". Seen in the wild
+    # 2026-07-26 on a 26h-old virt-handler while QGS was perfectly healthy.
+    # Cheap to detect here; the remedy needs cluster-scoped rights the
+    # bm-e2e SA deliberately lacks, so this reports rather than fixes.
+    shell: bash
+    run: |
+      set -uo pipefail
+      if kubectl auth can-i get nodes >/dev/null 2>&1; then
+        N=$(kubectl get node -l kubevirt.io/tdx=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/tdx}' 2>/dev/null)
+        echo "devices.kubevirt.io/tdx = ${N:-unknown}"
+        if [ "${N:-0}" = "0" ]; then
+          echo "::error title=TDX devices exhausted::virt-handler is advertising 0 TDX devices. Fix on the host: kubectl -n kubevirt rollout restart daemonset/virt-handler"
+          exit 1
+        fi
+      else
+        echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
+      fi
 
   - name: sign the server launch and attach opkeydata
     # The same exact public PEM is signed into launch.yaml, bound by the
@@ -307,13 +363,9 @@ runs:
     shell: bash
     run: |
       set -euo pipefail
-      # The refs ConfigMap is the pinned image tuple here (the published
-      # manifest is resolved after boot); hand it to the generator in the
-      # manifest shape get-kubeconfig reads. server.key is the run's operator key.
-      jq -n --arg mrtd "$mrtd" --arg rtmr1 "$rtmr1" --arg rtmr2 "$rtmr2" \
-        '{tdx: {mrtd: $mrtd, rtmr1: $rtmr1, rtmr2: $rtmr2}}' > /tmp/pinned-manifest.json
+      # The published manifest pins the image before its launch is signed.
       c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
-        --image-manifest /tmp/pinned-manifest.json
+        --image-manifest /tmp/image-manifest.json
       kubectl -n "$NS" create secret generic "$VM-opkey" \
         --from-file=pubkey=/tmp/launch-data/server/pubkey \
         --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
@@ -454,66 +506,6 @@ runs:
       done
       [ "$ready" = 1 ] || { echo "::error::credential release did not start; signed launch or measured service startup failed"; exit 1; }
 
-  - name: resolve the staged image's published manifest
-    if: inputs.exact_image != 'true'
-    shell: bash
-    run: |
-      set -euo pipefail
-      # Pull the manifest the image build published rather than writing
-      # one: a hand-built stub only ever proves the gate accepts the shape
-      # this step chose. manifest.json ships as a layer of the oras
-      # artifact that sits beside the CDI image the CVM boots.
-      #
-      # The CM's 'image' may be a tag OR a digest (digest-pinning the boot
-      # ref is the stronger position). A digest carries no name, so resolve
-      # it back to the sibling tag that points at it; without that the only
-      # candidate left is the floating dev tag, which moves independently of
-      # the pinned image.
-      #
-      # Candidates are matched on the whole mrtd+rtmr1+rtmr2 tuple. MRTD
-      # alone does not identify a build: two builds sharing a firmware and
-      # memory layout have the same MRTD while their kernels, and so their
-      # RTMR[1], differ. Matching on MRTD accepted such a manifest and the
-      # run then failed inside get-kubeconfig on an RTMR[1] mismatch.
-      repo="${image%%@*}"; repo="${repo%%:*}"
-      cands="${imageTag:-}"
-      case "$image" in
-        *@*)
-          # Digest: find the -cdi tag resolving to it, and take its sibling.
-          want="${image#*@}"
-          for t in $(crane ls "$repo" 2>/dev/null | grep -E -- '-cdi(-[0-9a-f]+)?$'); do
-            [ "$(crane digest "$repo:$t" 2>/dev/null)" = "$want" ] || continue
-            cands="$cands $t"; break
-          done
-          ;;
-        *-cdi*) cands="$cands ${image#*:}" ;;      # tag: strip the -cdi suffix
-      esac
-      # shellcheck disable=SC2086  # deliberate split: cands is a word list
-      cands="$(printf '%s\n' ${cands} | sed 's/-cdi//' | awk 'NF && !seen[$0]++')"
-      # No blind fallback to rke2-tdx-dev: it floats independently of the
-      # pinned image, and the dev variant is a serial-root-autologin build
-      # that is never shipped. Pin it through imageTag if it is genuinely
-      # under test, so the choice is recorded in the CM.
-      [ -n "$cands" ] || { echo "::error::cannot derive a manifest tag from image '$image'. Set 'imageTag' in $REFS_CM to the oras tag published beside it"; exit 1; }
-      got_mrtd=""; oras_ref=""
-      for t in $cands; do
-        d=$(crane manifest "$repo:$t" 2>/dev/null | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest') || true
-        [ -n "$d" ] || { echo "  $t: no manifest.json layer"; continue; }
-        crane blob "$repo@$d" > /tmp/candidate-manifest.json 2>/dev/null || continue
-        m=$(jq -r '.tdx.mrtd // empty' /tmp/candidate-manifest.json)
-        m1=$(jq -r '.tdx.rtmr1 // empty' /tmp/candidate-manifest.json)
-        m2=$(jq -r '.tdx.rtmr2 // empty' /tmp/candidate-manifest.json)
-        if [ "$m" = "$mrtd" ] && [ "$m1" = "$rtmr1" ] && [ "$m2" = "$rtmr2" ]; then
-          cp /tmp/candidate-manifest.json /tmp/image-manifest.json
-          got_mrtd="$m"; oras_ref="$repo:$t"; break
-        fi
-        echo "  $t: tuple mismatch (mrtd ${m:0:16}/${mrtd:0:16} rtmr1 ${m1:0:16}/${rtmr1:0:16} rtmr2 ${m2:0:16}/${rtmr2:0:16})"
-      done
-      # Fail closed: without a manifest from the booted build there is
-      # nothing to pin the gate to.
-      [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the oras tag published beside the pinned image"; exit 1; }
-      echo "manifest from $oras_ref (MRTD $got_mrtd)"
-
   - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
     shell: bash
     run: |
@@ -601,7 +593,7 @@ runs:
         echo "| | |"
         echo "|---|---|"
         echo "| image | \`${image:-?}\` |"
-        echo "| coverage | ${{ inputs.exact_image == 'true' && 'exact published image' || 'staged stack regression' }} |"
+        echo "| coverage | ${{ inputs.exact_image == 'true' && 'exact published image' || 'commit under test on its own node image' }} |"
         echo "| rootPvc | \`${rootPvc:-?}\` |"
         echo "| c8s ref | \`${c8sRef:-?}\` |"
         echo "| MRTD | \`${mrtd:0:32}...\` |"

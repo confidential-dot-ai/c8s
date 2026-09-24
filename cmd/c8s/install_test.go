@@ -837,7 +837,7 @@ func TestRouterHostPort(t *testing.T) {
 func TestHostPortConflict(t *testing.T) {
 	pod := func(ns, name, node string, port int32) corev1.Pod {
 		return corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+			Namespace: ns, Name: name,
 			Spec: corev1.PodSpec{
 				NodeName:   node,
 				Containers: []corev1.Container{{Name: "c", Ports: []corev1.ContainerPort{{HostPort: port}}}},
@@ -1725,12 +1725,10 @@ func TestAdmissibleDigests(t *testing.T) {
 // platformPod builders for the denial check.
 func daemonSetPod(ns, name, image, imageID string) corev1.Pod {
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       ns,
-			Name:            name,
-			OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "ds"}},
-		},
-		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Image: image, ImageID: imageID}}},
+		Namespace:       ns,
+		Name:            name,
+		OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "ds"}},
+		Status:          corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Image: image, ImageID: imageID}}},
 	}
 }
 
@@ -1896,10 +1894,10 @@ func TestReportExemptedImages(t *testing.T) {
 // --rtmrs completes the TDX pin: the entries fan into cds.rtmrs and
 // ratlsMesh.rtmrs, normalized and in index order.
 func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
-	prev := installRTMRs
-	defer func() { installRTMRs = prev }()
+	prev := installRegisters
+	defer func() { installRegisters = prev }()
 	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
-	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
+	installRegisters = []string{"2=" + r2, "1=" + r1} // out of order on purpose
 
 	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx")
 	if err != nil {
@@ -1914,7 +1912,7 @@ func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
 		}
 	}
 
-	installRTMRs = []string{"0=" + r1}
+	installRegisters = []string{"0=" + r1}
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx"); err == nil {
 		t.Fatal("RTMR[0] pin accepted; only RTMR[1] and RTMR[2] are supported")
 	}

@@ -183,8 +183,7 @@ func TestTokenRouteLoopbackHasNoPeerPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := &fakeResolver{pid: -1, sandboxID: "sandbox-1"}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = ServeTokens(ctx, l, resolver, testSigner(t)) }()
 
 	requester := testRequesterKey(t)
@@ -682,8 +681,7 @@ func TestServeSurfacesListenerError(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	if err := ServeDigests(ctx, l, &fakeResolver{}, nil); err == nil {
 		t.Fatal("ServeDigests on a closed listener returned nil")
 	}
@@ -823,6 +821,10 @@ func TestSandboxContainerKeyIsInjective(t *testing.T) {
 		{"/app", "\xfe"},
 		{"/app", "�"},
 		{"/app\n--serve"},
+		{`/app" "--serve`},
+		{`/app\"`, "--serve"},
+		{`/app] env=nil mounts=[{}`},
+		{"/app", "nil", "[]", "{}"},
 		{"/app", "", "--serve"},
 	}
 
@@ -865,5 +867,18 @@ func TestSandboxTokenUnavailableFailsClosed(t *testing.T) {
 	_, err = FetchSandboxToken(t.Context(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
 	if err == nil || errors.Is(err, ErrSandboxUnsupported) || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("err = %v, want a temporary HTTP failure without unsupported fallback", err)
+	}
+}
+
+func TestIsInjectedContainerName(t *testing.T) {
+	for _, name := range []string{CertContainerName, CertWaitContainerName, SecretContainerName, VolumeContainerName} {
+		if !IsInjectedContainerName(name) {
+			t.Errorf("%q is injected by the webhook but not recognized", name)
+		}
+	}
+	for _, name := range []string{"app", "c8s", "c8s-certs", "c8s-cert-waiter"} {
+		if IsInjectedContainerName(name) {
+			t.Errorf("%q is a workload container but was treated as injected", name)
+		}
 	}
 }

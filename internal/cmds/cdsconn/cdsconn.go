@@ -12,10 +12,8 @@ package cdsconn
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,8 +22,8 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -45,9 +43,8 @@ type Options struct {
 	OperatorKey        string
 	Insecure           bool
 
-	// Verify is the evidence verifier; a stub in tests. Zero means
-	// localverify.Verify.
-	Verify localverify.VerifyFunc
+	// Verifier verifies endpoint evidence. Nil defaults to LocalVerifier.
+	Verifier PinVerifier
 }
 
 // BindFlags registers the connection and credential flags on a command's
@@ -55,8 +52,8 @@ type Options struct {
 func BindFlags(pf *pflag.FlagSet, o *Options) {
 	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS router or direct CDS base URL (required); WebPKI router URLs are not attestation-bound")
 	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the router value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
-	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
-	pf.StringVar(&o.MeasurementsConfig, "measurements-config", "", "complete endpoint image, RTMR and launch-bound operator policy; excludes --measurements and --measurements-file")
+	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "text file of trusted endpoint SHA-384 hex digests, one per line; use --image-policy-file for complete JSON policies")
+	cmdsutil.BindImagePolicyFlags(pf, &o.MeasurementsConfig, nil, "", "pins the endpoint; excludes --measurements and --measurements-file")
 	pf.DurationVar(&o.Timeout, "timeout", 15*time.Second, "per-request timeout")
 	pf.StringVar(&o.OperatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+EnvOperatorKey+"); required for writes")
 	pf.BoolVar(&o.Insecure, "insecure", false, "dev/test only: allow a plaintext http:// CDS URL, skipping RA-TLS attestation of CDS")
@@ -83,7 +80,7 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 	switch u.Scheme {
 	case "http":
 		if o.MeasurementsConfig != "" {
-			return nil, fmt.Errorf("--measurements-config requires https; plaintext cannot enforce its endpoint identity")
+			return nil, fmt.Errorf("--image-policy-file requires https; plaintext cannot enforce its endpoint identity")
 		}
 		if !o.Insecure {
 			return nil, fmt.Errorf("refusing plaintext http:// for CDS (no attestation): use https:// (RA-TLS), or pass --insecure for a dev/test endpoint")
@@ -118,64 +115,43 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 func (o *Options) httpsClient(ctx context.Context, pins refvalues.ReferenceValues) (*http.Client, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
-	verify := o.pinnedVerifier(pins)
-	hc, err := routerdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, pins.Digests(), verify)
+	verify := o.pinVerifier(pins)
+	hc, err := routerdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, pins.Digests(), verify.Verify)
 	switch {
 	case err == nil:
 		fmt.Fprintln(os.Stderr, "note: target is a router front door; verified its discovery attestation and bound this session to the attested connection")
 		return hc, nil
 	case errors.Is(err, routerdiscovery.ErrNoDiscovery):
-		return localverify.NewRATLSHTTPClient(pins.Digests(), verify, o.Timeout), nil
+		return localverify.NewRATLSHTTPClient(pins.Digests(), verify.Verify, o.Timeout), nil
 	default:
 		return nil, err
 	}
 }
 
 func (o *Options) loadPins() (refvalues.ReferenceValues, error) {
-	if o.MeasurementsConfig != "" {
-		if len(o.Measurements) != 0 || o.MeasurementsFile != "" {
-			return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --measurements-file")
-		}
-		return refvalues.Load(o.MeasurementsConfig)
+	source := cmdsutil.ImagePolicySource{File: o.MeasurementsConfig}
+	if source.IsSet() {
+		return source.LoadValues(cmdsutil.MeasurementPins{Measurements: o.Measurements, MeasurementsFile: o.MeasurementsFile})
 	}
 	digests, err := o.loadMeasurements()
 	return refvalues.FromFlags(digests, nil), err
 }
 
-// pinnedVerifier keeps full tuple checks on both the discovery and direct
-// RA-TLS paths, which otherwise carry only legacy launch-digest slices.
-func (o *Options) pinnedVerifier(pins refvalues.ReferenceValues) localverify.VerifyFunc {
-	verify := o.verifyFunc()
+func (o *Options) pinVerifier(pins refvalues.ReferenceValues) PinVerifier {
+	verify := o.Verifier
+	if verify == nil {
+		verify = LocalVerifier{}
+	}
 	if o.MeasurementsConfig == "" {
 		return verify
 	}
-	return func(ctx context.Context, platform string, evidence json.RawMessage, params localverify.Params) (*teetypes.VerificationResult, error) {
-		result, err := verify(ctx, platform, evidence, params)
-		if err != nil {
-			return nil, err
-		}
-		if result == nil {
-			return nil, fmt.Errorf("endpoint verifier returned no result")
-		}
-		if err := remote.EnforceImages(remote.VerifyResponse{Result: *result}, pins.Images, teetypes.NormalizePlatform(platform)); err != nil {
-			return nil, fmt.Errorf("endpoint identity: %w", err)
-		}
-		return result, nil
-	}
+	return ImagePinVerifier{Verifier: verify, Images: pins.Images}
 }
 
 // loadMeasurements combines Measurements and MeasurementsFile into the raw
 // digest byte form RA-TLS verification expects.
 func (o *Options) loadMeasurements() ([][]byte, error) {
-	hexes := append([]string{}, o.Measurements...)
-	if o.MeasurementsFile != "" {
-		data, err := os.ReadFile(o.MeasurementsFile)
-		if err != nil {
-			return nil, fmt.Errorf("read --measurements-file: %w", err)
-		}
-		hexes = append(hexes, strings.Split(string(data), "\n")...)
-	}
-	return refvalues.ParseHexMeasurementsList(hexes)
+	return cmdsutil.LoadMeasurements(o.Measurements, o.MeasurementsFile)
 }
 
 // Signer builds the operator credential from the flag or the environment. The
@@ -218,19 +194,22 @@ func (o *Options) requirePinnedEndpoint() error {
 	if u, err := url.Parse(o.URL); err == nil && u.Scheme == "http" {
 		return nil
 	}
-	pins, err := o.loadPins()
+	pinned, err := o.Pinned()
 	if err != nil {
 		return err
 	}
-	if pins.Empty() {
-		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
+	if !pinned {
+		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --image-policy-file <policy.json>, --measurements <endpoint build ID>, or --measurements-file; use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
 	}
 	return nil
 }
 
-func (o *Options) verifyFunc() localverify.VerifyFunc {
-	if o.Verify != nil {
-		return o.Verify
+// Pinned reports whether the image policy or measurement flags name at least
+// one trusted endpoint image.
+func (o *Options) Pinned() (bool, error) {
+	pins, err := o.loadPins()
+	if err != nil {
+		return false, err
 	}
-	return localverify.Verify
+	return !pins.Empty(), nil
 }

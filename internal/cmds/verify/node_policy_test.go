@@ -3,13 +3,13 @@ package verify
 import (
 	"encoding/hex"
 	"errors"
-	"github.com/confidential-dot-ai/attestation-go/remote"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
@@ -27,7 +27,7 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 		r := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformTDX}
 		r.Claims.LaunchDigest = hex.EncodeToString(entry.Digest)
 		r.Claims.PlatformData = map[string]any{}
-		for idx, pin := range entry.RTMRs {
+		for idx, pin := range entry.Registers {
 			r.Claims.PlatformData["rtmr_"+string(rune('0'+idx))] = hex.EncodeToString(pin)
 		}
 		seed := runtimemeasure.Seed(key)
@@ -64,7 +64,7 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 	complete := entry
 	complete.Digest = []byte(strings.Repeat("x", 48))
 	weak := entry
-	weak.RTMRs = nil
+	weak.Registers = nil
 	plan.refValues.Images = []remote.ImagePin{weak, complete}
 	if got := newOutcome(config{}, &evidence{}, bound(entry.Anchor), nil, plan); got.Verified || !strings.Contains(got.Error, "MRTD only") {
 		t.Fatalf("weak matching image borrowed unrelated pins: %+v", got)

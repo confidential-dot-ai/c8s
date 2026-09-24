@@ -1,5 +1,5 @@
-{{- if and .Values.node.bakedServices (or (ne .Values.attestationApi.cvmMode "bare-metal") .Values.attestationApi.enabled .Values.nriImagePolicy.enabled .Values.volumed.enabled) -}}
-{{- fail "node.bakedServices requires cvmMode=bare-metal and attestationApi, nriImagePolicy and volumed disabled: these services are owned by the measured image" -}}
+{{- if and .Values.node.baked (or (ne .Values.attestationApi.cvmMode "bare-metal") .Values.attestationApi.enabled .Values.nriImagePolicy.enabled .Values.volumed.enabled) -}}
+{{- fail "node.baked requires cvmMode=bare-metal and attestationApi, nriImagePolicy and volumed disabled: these services are owned by the measured image" -}}
 {{- end -}}
 {{- if not (has .Values.attestationApi.cvmMode (list "bare-metal" "gke" "aks")) -}}
 {{- fail (printf "attestationApi.cvmMode must be one of bare-metal, gke, aks (got %q)" .Values.attestationApi.cvmMode) -}}
@@ -69,7 +69,7 @@
 {{- range $c := (include "c8s.components" . | fromJsonArray) -}}
 {{- $img := get $c "image" -}}
 {{- if and (get $c "enabled") (not (get $c "cdsExempt")) (not (get $c "argvPinned")) (get $img "digest") (not (hasKey $covered (get $img "digest"))) -}}
-{{- fail (printf "VALIDATION_ERROR kind=uncovered_component_digest: nriImagePolicy.policy.mode=fail-closed with deriveComponents=false, but %s is digest-pinned (%s) and no nriImagePolicy.bootstrapAllowlist.workloads entry admits that digest under any command and args. The plugin would deny it on its own node. Add such an entry (c8s allowlist add writes the same shape), set deriveComponents=true, or use c8s install --resolve-digests." (get $c "name") (get $img "digest")) -}}
+{{- fail (printf "VALIDATION_ERROR kind=uncovered_component_digest: nriImagePolicy.policy.mode=fail-closed with deriveComponents=false, but %s is digest-pinned (%s) and no nriImagePolicy.bootstrapAllowlist.workloads entry leaves command, args, env and mounts unconstrained for that digest. The plugin would deny it on its own node. Add such an entry (c8s allowlist add writes the same shape), set deriveComponents=true, or use c8s install --resolve-digests." (get $c "name") (get $img "digest")) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

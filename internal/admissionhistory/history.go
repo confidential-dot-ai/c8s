@@ -2,11 +2,11 @@
 package admissionhistory
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -19,7 +19,8 @@ type History struct {
 
 // Record adds an admission; only a resolved record for the same ID clears an
 // unresolved container. History owns its copy of argv.
-func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObservation) {
+// Nil mounts means unavailable evidence; a non-nil empty slice means no mounts.
+func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObservation, mounts ...allowlist.ObservedMount) {
 	if h.byKey == nil {
 		h.byKey = map[string]workloadclaims.SandboxContainer{}
 		h.unresolved = map[string]struct{}{}
@@ -29,8 +30,25 @@ func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObs
 		return
 	}
 	delete(h.unresolved, id)
-	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone()}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone(), Mounts: slices.Clone(mounts)}
+	slices.SortFunc(c.Mounts, compareObservedMounts)
 	h.byKey[c.Key()] = c
+}
+
+func compareObservedMounts(a, b allowlist.ObservedMount) int {
+	order := cmp.Or(
+		cmp.Compare(a.Destination, b.Destination),
+		cmp.Compare(a.Class, b.Class),
+		cmp.Compare(a.Storage, b.Storage),
+		cmp.Compare(a.HostSourceDigest, b.HostSourceDigest),
+	)
+	if order != 0 || a.ReadOnly == b.ReadOnly {
+		return order
+	}
+	if a.ReadOnly {
+		return 1
+	}
+	return -1
 }
 
 // Snapshot returns sorted, independent copies of the digest set and admissions.
@@ -45,6 +63,7 @@ func (h History) Snapshot() ([]string, []workloadclaims.SandboxContainer, error)
 		digests = append(digests, c.Digest)
 		c.Argv = slices.Clone(c.Argv)
 		c.Env = c.Env.Clone()
+		c.Mounts = slices.Clone(c.Mounts)
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)

@@ -19,7 +19,6 @@
    gate a no-op, deriving even disabled components that carry a digest. */ -}}
 {{- $enabled := true -}}
 {{- if $c.enabledPath -}}{{- $enabled = eq (include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath)) "true" -}}{{- end -}}
-{{- if and $root.Values.node.bakedServices (ne $c.valuePath "image") -}}{{- $enabled = false -}}{{- end -}}
 {{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt "argvPinned" (get $c "argvPinned" | default false)) -}}
 {{- end -}}
 {{ $out | toJson }}
@@ -36,7 +35,7 @@
 {{- end -}}
 {{- end -}}
 {{- $cdsImg := .Values.cds.image -}}
-{{- if and $cdsImg.digest (not .Values.node.bakedServices) -}}
+{{- if $cdsImg.digest -}}
 {{- $_ := set $digests $cdsImg.digest (printf "%s@%s" $cdsImg.repository $cdsImg.digest) -}}
 {{- end -}}
 {{- /* router nginx self-entry: a chart-deployed non-c8s system image. It is
@@ -46,7 +45,7 @@
        enabled — like the CDS self-entry above, independent of deriveComponents
        — so a default install admits the nginx it ships without the operator
        hand-writing an entry for it. */}}
-{{- if and .Values.router.enabled (not .Values.node.bakedServices) -}}
+{{- if .Values.router.enabled -}}
 {{- $lbImg := .Values.router.nginx.image -}}
 {{- if $lbImg.digest -}}
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}
@@ -59,7 +58,7 @@
 {{- $digests := dict -}}
 {{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
 {{- range $c := concat (default list $entry.initContainers) (default list $entry.containers) -}}
-{{- if and (eq (dig "command" "policy" "" $c) "any") (eq (dig "args" "policy" "" $c) "any") (eq (dig "env" "policy" "any" $c) "any") (eq (dig "mounts" "policy" "any" $c) "any") -}}
+{{- if and (eq (dig "command" "policy" "" $c) "any") (eq (dig "args" "policy" "" $c) "any") (eq (dig "env" "policy" "any" $c) "any") (eq (dig "mounts" "policy" "deny" $c) "any") -}}
 {{- $_ := set $digests $c.digest (default $entry.label $c.image | default "") -}}
 {{- end -}}
 {{- end -}}
@@ -76,7 +75,7 @@
 {{- range $digest, $image := (merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson)) -}}
 {{- if not (has $digest $pinnedDigests) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
-{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+{{- $container := dict "digest" $digest "image" $image "mounts" (dict "policy" "any") "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
 {{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
 {{- end -}}
 {{- end -}}
@@ -101,12 +100,15 @@
 {{- $script = include "nri-image-policy.pinsScript" (dict "root" .) -}}
 {{- end -}}
 {{- $sh := dict "policy" "exact" "argv" (list "/bin/sh" "-c") -}}
+{{- /* Platform setup scripts require host mounts; their executable and script argv stay pinned. */ -}}
 {{- $containers := list -}}
-{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $script ""))))) -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "mounts" (dict "policy" "any") "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $script ""))))) -}}
 {{- if .Values.nriImagePolicy.uninstall.enabled -}}
-{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" (.Files.Get "files/scripts/uninstall.sh") ""))))) -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "mounts" (dict "policy" "any") "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" (.Files.Get "files/scripts/uninstall.sh") ""))))) -}}
 {{- end -}}
 {{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list "sleep infinity"))) -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "mounts" (dict "policy" "any") "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" (.Files.Get "files/scripts/host-sweep.sh") ""))))) -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" (dict "policy" "exact" "argv" (list "/bin/sleep")) "args" (dict "policy" "exact" "argv" (list "2147483647"))) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $ref) -}}
 {{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" $containers) -}}
 {{- $prepScript := .Files.Get "files/scripts/containerd-prep.sh" -}}
@@ -117,7 +119,7 @@
 {{- end -}}
 {{- end -}}
 {{- range $digest, $ref := $prepDigests -}}
-{{- $container := dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $prepScript "")))) -}}
+{{- $container := dict "digest" $digest "image" $ref "mounts" (dict "policy" "any") "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $prepScript "")))) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $ref) -}}
 {{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" (list $container)) -}}
 {{- end -}}
@@ -128,7 +130,7 @@
 {{- $ref := printf "%s@%s" $img.repository $img.digest -}}
 {{- $containers := list -}}
 {{- range $path := list "/script/setup" "/script/teardown" -}}
-{{- $containers = append $containers (dict "digest" $img.digest "image" $ref "command" (dict "policy" "exact" "argv" (list "/bin/sh" $path)) "args" (dict "policy" "any")) -}}
+{{- $containers = append $containers (dict "digest" $img.digest "image" $ref "mounts" (dict "policy" "any") "command" (dict "policy" "exact" "argv" (list "/bin/sh" $path)) "args" (dict "policy" "any")) -}}
 {{- end -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $img.digest "image" $ref) -}}
 {{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" $containers) -}}
@@ -158,7 +160,7 @@
 {{- range $digest, $image := (include "c8s.imageAllowlist" . | fromJson) -}}
 {{- if not (has $digest $pinnedDigests) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
-{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") "env" (dict "policy" "any") -}}
+{{- $container := dict "digest" $digest "image" $image "mounts" (dict "policy" "any") "command" (dict "policy" "any") "args" (dict "policy" "any") "env" (dict "policy" "any") -}}
 {{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
 {{- end -}}
 {{- end -}}

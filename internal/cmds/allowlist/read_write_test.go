@@ -176,7 +176,7 @@ func TestListTextWorkloadTable(t *testing.T) {
 	}
 
 	rows := map[string][]string{}
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if f := strings.Fields(line); len(f) > 0 {
 			rows[f[0]] = f
 		}
@@ -426,7 +426,7 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		"empty":{},
 		"tagged":{"label":"docker.io/library/busybox:latest","containers":[
 			{"digest":"`+digA+`","image":"docker.io/library/busybox:latest",
-			 "command":{"policy":"any"},"args":{"policy":"any"}}]},
+			 "command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]},
 		"other":{"secrets":{"policy":"allow","read":["/**"]},"containers":[
 			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
 			{"digest":"`+digB+`","command":{"policy":"deny"},"args":{"policy":"deny"}}]}}}`)

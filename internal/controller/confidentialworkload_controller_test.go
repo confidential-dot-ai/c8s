@@ -25,11 +25,9 @@ import (
 // PodReady=True condition that isPodReady keys on.
 func cwPod(name, ns, cwName string, ready bool) *corev1.Pod {
 	p := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   ns,
-			Annotations: map[string]string{webhook.AnnotationWorkload: cwName},
-		},
+		Name:        name,
+		Namespace:   ns,
+		Annotations: map[string]string{webhook.AnnotationWorkload: cwName},
 	}
 	if ready {
 		p.Status.Conditions = []corev1.PodCondition{
@@ -45,7 +43,7 @@ func cwPod(name, ns, cwName string, ready bool) *corev1.Pod {
 
 func confidentialWorkload(ns, name string, generation int64) *v1alpha2.ConfidentialWorkload {
 	return &v1alpha2.ConfidentialWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Generation: generation},
+		Name: name, Namespace: ns, Generation: generation,
 		Spec: v1alpha2.ConfidentialWorkloadSpec{
 			WorkloadRef: v1alpha2.WorkloadRef{Kind: v1alpha2.WorkloadKindDeployment, Name: name},
 		},
@@ -64,7 +62,7 @@ func cwReconcilerFor(objs ...client.Object) *ConfidentialWorkloadReconciler {
 func cwReconcile(t *testing.T, r *ConfidentialWorkloadReconciler, ns, name string) ctrl.Result {
 	t.Helper()
 	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
+		Namespace: ns, Name: name,
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -88,7 +86,7 @@ func TestConfidentialWorkloadResolvesWorkloadRefCWID(t *testing.T) {
 	// behavior) would count the wrong pod; resolving spec.workloadRef finds the
 	// real member pods (M-09).
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-deploy", Namespace: ns},
+		Name: "api-deploy", Namespace: ns,
 		Spec: appsv1.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -98,7 +96,7 @@ func TestConfidentialWorkloadResolvesWorkloadRefCWID(t *testing.T) {
 		},
 	}
 	cw := &v1alpha2.ConfidentialWorkload{
-		ObjectMeta: metav1.ObjectMeta{Name: "cw-name", Namespace: ns, Generation: 1},
+		Name: "cw-name", Namespace: ns, Generation: 1,
 		Spec: v1alpha2.ConfidentialWorkloadSpec{
 			WorkloadRef: v1alpha2.WorkloadRef{Kind: v1alpha2.WorkloadKindDeployment, Name: "api-deploy"},
 		},
@@ -159,7 +157,7 @@ func TestConfidentialWorkloadReconcileAllAttested(t *testing.T) {
 		// Different workload in the same namespace: must not be counted.
 		cwPod("other", "tenant", "elsewhere", true),
 		// No cw annotation: ignored.
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bare", Namespace: "tenant"}},
+		&corev1.Pod{Name: "bare", Namespace: "tenant"},
 	)
 
 	cwReconcile(t, r, "tenant", "wl")
@@ -234,12 +232,12 @@ func TestConfidentialWorkloadReconcileIsIdempotent(t *testing.T) {
 func TestResolveWorkloadCWIDFallsBackToCWName(t *testing.T) {
 	const ns = "tenant"
 	depNoAnnotation := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: ns},
-		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{}},
+		Name: "plain", Namespace: ns,
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{}},
 	}
 	cwWith := func(kind v1alpha2.WorkloadKind, refName string) *v1alpha2.ConfidentialWorkload {
 		return &v1alpha2.ConfidentialWorkload{
-			ObjectMeta: metav1.ObjectMeta{Name: "cw-name", Namespace: ns},
+			Name: "cw-name", Namespace: ns,
 			Spec: v1alpha2.ConfidentialWorkloadSpec{
 				WorkloadRef: v1alpha2.WorkloadRef{Kind: kind, Name: refName},
 			},
@@ -275,7 +273,7 @@ func TestConfidentialWorkloadListPodsErrorSurfaces(t *testing.T) {
 		}).Build()
 	r := &ConfidentialWorkloadReconciler{Client: c}
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "wl"},
+		Namespace: "tenant", Name: "wl",
 	})
 	if err == nil || !strings.Contains(err.Error(), "list pods") {
 		t.Fatalf("err = %v, want list pods failure", err)
@@ -293,7 +291,7 @@ func TestConfidentialWorkloadStatusUpdateErrorSurfaces(t *testing.T) {
 		}).Build()
 	r := &ConfidentialWorkloadReconciler{Client: c}
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "wl"},
+		Namespace: "tenant", Name: "wl",
 	})
 	if err == nil || !strings.Contains(err.Error(), "status update") {
 		t.Fatalf("err = %v, want status update failure", err)

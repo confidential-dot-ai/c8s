@@ -78,39 +78,39 @@ func serverHostPort(t *testing.T, srv *httptest.Server) string {
 // two nodes. Each side authorizes the other independently on TDX and SNP.
 func TestJoinExchangeE2E(t *testing.T) {
 	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
-		for _, scenario := range []string{"authorized", "wrong leader key", "wrong follower key", "wrong leader image", "wrong follower image", "wrong leader TEE", "wrong follower TEE"} {
+		for _, scenario := range []string{"authorized", "wrong server key", "wrong agent key", "wrong server image", "wrong agent image", "wrong server TEE", "wrong agent TEE"} {
 			t.Run(string(platform)+"/"+scenario, func(t *testing.T) {
 				dir := ramTempDir(t)
-				leaderKey, followerKey := operatorKey(t), operatorKey(t)
-				leaderVerdict := verifyResp(platform, leaderKey)
-				followerVerdict := verifyResp(platform, followerKey)
+				serverKey, agentKey := operatorKey(t), operatorKey(t)
+				serverVerdict := verifyResp(platform, serverKey)
+				agentVerdict := verifyResp(platform, agentKey)
 				switch scenario {
-				case "wrong leader key":
-					leaderVerdict = verifyResp(platform, followerKey)
-				case "wrong follower key":
-					followerVerdict = verifyResp(platform, leaderKey)
-				case "wrong leader image":
-					leaderVerdict.Result.Claims.LaunchDigest = digestB
-				case "wrong follower image":
-					followerVerdict.Result.Claims.LaunchDigest = digestB
+				case "wrong server key":
+					serverVerdict = verifyResp(platform, agentKey)
+				case "wrong agent key":
+					agentVerdict = verifyResp(platform, serverKey)
+				case "wrong server image":
+					serverVerdict.Result.Claims.LaunchDigest = digestB
+				case "wrong agent image":
+					agentVerdict.Result.Claims.LaunchDigest = digestB
 				}
-				leaderAPI := newFakeAPI(t, staticVerify(followerVerdict))
-				followerAPI := newFakeAPI(t, staticVerify(leaderVerdict))
-				leaderAPI.platform, followerAPI.platform = platform, platform
+				serverAPI := newFakeAPI(t, staticVerify(agentVerdict))
+				agentAPI := newFakeAPI(t, staticVerify(serverVerdict))
+				serverAPI.platform, agentAPI.platform = platform, platform
 				other := teetypes.PlatformSNP
 				if platform == teetypes.PlatformSNP {
 					other = teetypes.PlatformTDX
 				}
-				if scenario == "wrong leader TEE" {
-					leaderAPI.platform = other
+				if scenario == "wrong server TEE" {
+					serverAPI.platform = other
 				}
-				if scenario == "wrong follower TEE" {
-					followerAPI.platform = other
+				if scenario == "wrong agent TEE" {
+					agentAPI.platform = other
 				}
 				relCfg := releaseConfig(t)
 				relCfg.Platform = string(platform)
-				relCfg.AttestationAPIURL = leaderAPI.URL
-				relCfg.MeasurementsConfig = policyFile(t, platform, policyEntry(t, platform, followerKey))
+				relCfg.AttestationAPIURL = serverAPI.URL
+				relCfg.MeasurementsConfig = policyFile(t, platform, policyEntry(t, platform, agentKey))
 				if err := os.WriteFile(relCfg.TokenPath, []byte(testToken+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -134,8 +134,8 @@ func TestJoinExchangeE2E(t *testing.T) {
 						t.Error("join release did not shut down")
 					}
 				}()
-				cfg := JoinConfig{ServerAddr: relCfg.ListenAddr, AttestationAPIURL: followerAPI.URL, Platform: string(platform),
-					MeasurementsConfig: policyFile(t, platform, policyEntry(t, platform, leaderKey)), TokenOut: filepath.Join(dir, "join-token"),
+				cfg := JoinConfig{ServerAddr: relCfg.ListenAddr, AttestationAPIURL: agentAPI.URL, Platform: string(platform),
+					MeasurementsConfig: policyFile(t, platform, policyEntry(t, platform, serverKey)), TokenOut: filepath.Join(dir, "join-token"),
 					Timeout: 2 * time.Second}
 				err = RunJoin(context.Background(), cfg)
 				if scenario != "authorized" {
@@ -156,8 +156,8 @@ func TestJoinExchangeE2E(t *testing.T) {
 					t.Fatal("wrong staged token")
 				}
 				assertMode(t, cfg.TokenOut, 0600)
-				if leaderAPI.verifyCalls.Load() != 1 || followerAPI.verifyCalls.Load() != 1 {
-					t.Fatalf("mutual verification: leader %d, follower %d", leaderAPI.verifyCalls.Load(), followerAPI.verifyCalls.Load())
+				if serverAPI.verifyCalls.Load() != 1 || agentAPI.verifyCalls.Load() != 1 {
+					t.Fatalf("mutual verification: server %d, agent %d", serverAPI.verifyCalls.Load(), agentAPI.verifyCalls.Load())
 				}
 				// join must never write an rke2 drop-in: launch-config
 				// staging is that file's only owner.
@@ -168,7 +168,7 @@ func TestJoinExchangeE2E(t *testing.T) {
 }
 
 // TestJoinRefusesMismatchedServer: the client's verifier reports the server's
-// operator key differs from the designated leader; the handshake must fail and nothing may be
+// operator key differs from the designated server; the handshake must fail and nothing may be
 // staged.
 func TestJoinRefusesMismatchedServer(t *testing.T) {
 	api := newFakeAPI(t, func(call int, _ remote.VerifyRequest) remote.VerifyResponse {

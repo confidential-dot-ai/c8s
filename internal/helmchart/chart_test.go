@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -26,6 +24,9 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigsyaml "sigs.k8s.io/yaml"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // helmFailMessage extracts the user-visible message from a `helm template`
@@ -531,25 +532,29 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("iptables-sync init container missing; initContainers=%v", containerNames(init))
 	}
-	if sync.StartupProbe == nil || sync.StartupProbe.Exec == nil {
-		t.Fatalf("iptables-sync must expose a startupProbe so the main proxy waits for the ready file; got %+v", sync.StartupProbe)
+	// HTTP because a locked node image denies every runc exec, so an exec
+	// probe would never pass there.
+	if sync.StartupProbe == nil || sync.StartupProbe.HTTPGet == nil {
+		t.Fatalf("iptables-sync must expose an HTTP startupProbe so the main proxy waits for interception; got %+v", sync.StartupProbe)
 	}
-	if got := strings.Join(sync.StartupProbe.Exec.Command, " "); !strings.Contains(got, "/tmp/ratls-iptables-ready") {
-		t.Errorf("iptables-sync startupProbe should check /tmp/ratls-iptables-ready; got %q", got)
+	if got := sync.StartupProbe.HTTPGet; got.Path != "/readyz" || got.Host != "127.0.0.1" {
+		t.Errorf("iptables-sync startupProbe = %+v, want GET /readyz on node loopback", got)
 	}
 
-	// The entire teardown contract hinges on the iptables-cleanup preStop
-	// hook firing last in the reverse-init-order stop sequence. A future
-	// refactor that drops the lifecycle stanza or renames the subcommand
-	// would silently leak iptables rules and ipsets across pod restarts —
-	// catch that here instead of in production.
+	// The entire teardown contract hinges on the iptables-cleanup container
+	// cleaning up last in the reverse-init-order stop sequence. A future
+	// refactor that drops --on-shutdown or renames the subcommand would
+	// silently leak iptables rules and ipsets across pod restarts — catch
+	// that here instead of in production.
 	cleanup := init[0]
-	if cleanup.Lifecycle == nil || cleanup.Lifecycle.PreStop == nil || cleanup.Lifecycle.PreStop.Exec == nil {
-		t.Fatalf("iptables-cleanup must declare a preStop exec hook; got %+v", cleanup.Lifecycle)
+	if cleanup.Lifecycle != nil {
+		t.Errorf("iptables-cleanup must clean up on SIGTERM, not through a lifecycle hook; got %+v", cleanup.Lifecycle)
 	}
-	preStop := strings.Join(cleanup.Lifecycle.PreStop.Exec.Command, " ")
-	if !strings.Contains(preStop, "ratls-mesh iptables-cleanup") {
-		t.Errorf("iptables-cleanup preStop must invoke 'ratls-mesh iptables-cleanup'; got %q", preStop)
+	command := strings.Join(cleanup.Command, " ")
+	for _, want := range []string{"ratls-mesh iptables-cleanup", "--on-shutdown"} {
+		if !strings.Contains(command, want) {
+			t.Errorf("iptables-cleanup command %q must contain %q", command, want)
+		}
 	}
 }
 
@@ -968,12 +973,7 @@ func hasCapability(c corev1.Container, want corev1.Capability) bool {
 	if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil {
 		return false
 	}
-	for _, got := range c.SecurityContext.Capabilities.Add {
-		if got == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.SecurityContext.Capabilities.Add, want)
 }
 
 // PrometheusRule's types live in a separate go module (prometheus-operator)
@@ -1132,14 +1132,9 @@ func TestChartAcceptsPreStopSleepAtBoundary(t *testing.T) {
 	if !ok {
 		t.Fatalf("iptables-cleanup init container missing")
 	}
-	if cleanup.Lifecycle == nil || cleanup.Lifecycle.PreStop == nil || cleanup.Lifecycle.PreStop.Exec == nil {
-		t.Fatalf("iptables-cleanup preStop exec hook missing: %+v", cleanup.Lifecycle)
-	}
-	// The preStop is `/bin/sh -c "<script>"` and the script is the last
-	// element; assert the rendered sleep value matches the boundary.
-	script := cleanup.Lifecycle.PreStop.Exec.Command[len(cleanup.Lifecycle.PreStop.Exec.Command)-1]
-	if !regexp.MustCompile(`(?m)^sleep 15$`).MatchString(script) {
-		t.Fatalf("preStop script did not render `sleep 15` at the boundary:\n%s", script)
+	command := strings.Join(cleanup.Command, " ")
+	if !strings.Contains(command, "--settle-delay=15s") {
+		t.Fatalf("iptables-cleanup did not render the boundary settle delay: %q", command)
 	}
 }
 
@@ -1603,16 +1598,24 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		return v.ConfigMap != nil && v.ConfigMap.Name == "c8s-attestation-api"
 	})
 	assertContainerMount(t, proxy, "socket-dir", "/var/run/nri-image-policy")
-	if proxy.ReadinessProbe == nil || proxy.ReadinessProbe.Exec == nil {
-		t.Fatalf("attest-proxy must carry an exec readiness probe (the API's loopback bind is not kubelet-dialable); got %+v", proxy.ReadinessProbe)
+	// HTTP (a locked node image denies every runc exec), against
+	// the proxy's own health listener: the API's loopback bind is not
+	// kubelet-dialable, and this is the evidence path's only liveness signal.
+	for name, probe := range map[string]*corev1.Probe{"readiness": proxy.ReadinessProbe, "liveness": proxy.LivenessProbe} {
+		if probe == nil || probe.HTTPGet == nil {
+			t.Fatalf("attest-proxy must carry an HTTP %s probe; got %+v", name, probe)
+		}
+		if probe.HTTPGet.Path != "/healthz" || probe.HTTPGet.Port.StrVal != "health" {
+			t.Fatalf("attest-proxy %s probe = %+v, want GET /healthz on the health port", name, probe.HTTPGet)
+		}
+		// Kubelet's 1s default probe timeout would flap the healthcheck's 3s
+		// internal budget.
+		if probe.TimeoutSeconds != 5 {
+			t.Fatalf("attest-proxy %s probe timeoutSeconds = %d, want 5", name, probe.TimeoutSeconds)
+		}
 	}
-	if proxy.LivenessProbe == nil || proxy.LivenessProbe.Exec == nil {
-		t.Fatalf("attest-proxy must carry an exec liveness probe (it is the evidence path's only liveness signal); got %+v", proxy.LivenessProbe)
-	}
-	// Kubelet's 1s default probe timeout would flap the healthcheck's 3s
-	// internal budget.
-	if proxy.ReadinessProbe.TimeoutSeconds != 5 || proxy.LivenessProbe.TimeoutSeconds != 5 {
-		t.Fatalf("exec probes must set timeoutSeconds=5; got readiness %d / liveness %d", proxy.ReadinessProbe.TimeoutSeconds, proxy.LivenessProbe.TimeoutSeconds)
+	if _, ok := findContainerPort(proxy, "health"); !ok {
+		t.Fatalf("attest-proxy must name its health port; got %+v", proxy.Ports)
 	}
 	// uid 0 owns the socket (clients reject a foreign owner) and gid 65532 is
 	// the socket's group — the chgrp works by membership, all caps dropped.
@@ -2311,6 +2314,102 @@ func TestChartRendersRouterPublicTLSAndDiscovery(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
 		t.Fatalf("router shareProcessNamespace = %v, want true", got)
 	}
+}
+
+// The locked node image's measured runtime wrapper denies every runc exec,
+// and CRI routes exec probes and lifecycle exec hooks through exactly that
+// call (internal/cmds/c8srunc). A c8s-owned exec probe would therefore never
+// pass on such a node — the component would sit in CrashLoop or never go
+// Ready — so the chart must render none.
+func TestChartRendersNoExecProbes(t *testing.T) {
+	// Every rendering that adds pod templates of its own: the default stack,
+	// the acme front door, and the volumed/GPU opt-ins.
+	renderings := map[string][]string{
+		"default": nil,
+		"acme": {
+			"--set-string", "router.publicTLS.mode=acme",
+			"--set", "router.san={lb.example.com}",
+			"--set-string", "router.acme.email=ops@example.com",
+		},
+		"volumed": {"--set", "volumed.enabled=true", "--set", "volumed.image.tag=dev"},
+	}
+	for name, args := range renderings {
+		t.Run(name, func(t *testing.T) {
+			out, err := helmTemplate(t, args...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			for _, found := range execProbesByTemplate(t, out) {
+				t.Errorf("%s renders %s, which a locked node image denies; use an HTTP, TCP or gRPC probe, or SIGTERM handling", found.source, found.what)
+			}
+		})
+	}
+}
+
+// execProbe is one exec probe or lifecycle exec hook, with the chart template
+// that rendered it.
+type execProbe struct {
+	source string
+	what   string
+}
+
+// execProbesByTemplate walks every rendered manifest for exec probes and
+// lifecycle exec hooks. The walk is structural rather than typed so it covers
+// every workload kind, including pod templates nested in a CronJob.
+func execProbesByTemplate(t *testing.T, helmOut string) []execProbe {
+	t.Helper()
+	var found []execProbe
+	for _, doc := range strings.Split(helmOut, "\n---\n") {
+		source := manifestSource(doc)
+		var obj any
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+			t.Fatalf("decode manifest from %s: %v", source, err)
+		}
+		for _, what := range findExecHooks(obj) {
+			found = append(found, execProbe{source: source, what: what})
+		}
+	}
+	return found
+}
+
+var manifestSourceRE = regexp.MustCompile(`(?m)^# Source: (\S+)`)
+
+func manifestSource(doc string) string {
+	if m := manifestSourceRE.FindStringSubmatch(doc); m != nil {
+		return m[1]
+	}
+	return "<unknown template>"
+}
+
+// findExecHooks returns a description of every probe or lifecycle handler in
+// the decoded manifest that spawns a process.
+func findExecHooks(node any) []string {
+	var found []string
+	switch v := node.(type) {
+	case map[string]any:
+		for key, child := range v {
+			switch key {
+			case "livenessProbe", "readinessProbe", "startupProbe":
+				if handler, ok := child.(map[string]any); ok && handler["exec"] != nil {
+					found = append(found, key+" with an exec handler")
+				}
+			case "lifecycle":
+				if handlers, ok := child.(map[string]any); ok {
+					for _, hook := range []string{"postStart", "preStop"} {
+						if h, ok := handlers[hook].(map[string]any); ok && h["exec"] != nil {
+							found = append(found, "a lifecycle "+hook+" exec hook")
+						}
+					}
+				}
+			}
+			found = append(found, findExecHooks(child)...)
+		}
+	case []any:
+		for _, child := range v {
+			found = append(found, findExecHooks(child)...)
+		}
+	}
+	return found
 }
 
 // TestChartRouterACMEMode pins the acme front door: the `c8s acme` native
@@ -3366,13 +3465,13 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 	}
 
 	var stack []*nginxBlock
-	for _, line := range strings.Split(conf, "\n") {
+	for line := range strings.SplitSeq(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasSuffix(trimmed, "{") {
-			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+		if before, ok := strings.CutSuffix(trimmed, "{"); ok {
+			fields := strings.Fields(strings.TrimSpace(before))
 			block := &nginxBlock{directives: make(map[string][][]string)}
 			cfg.all = append(cfg.all, block)
 			if len(fields) == 1 && fields[0] == "http" {
@@ -4387,7 +4486,7 @@ type docMeta struct {
 // we silently drop.
 func splitManifestDocs(manifest string) []string {
 	var out []string
-	for _, doc := range strings.Split(manifest, "\n---\n") {
+	for doc := range strings.SplitSeq(manifest, "\n---\n") {
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}
@@ -5209,7 +5308,7 @@ func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
 }
 
 // anyArgvEntryArgs renders one bootstrapAllowlist.workloads entry admitting
-// digest under any command and args, as `helm --set-string` arguments.
+// digest under any command, args, and mounts, as `helm --set-string` arguments.
 func anyArgvEntryArgs(name, digest, image string) []string {
 	p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
 	return []string{
@@ -5218,6 +5317,7 @@ func anyArgvEntryArgs(name, digest, image string) []string {
 		"--set-string", p + "containers[0].image=" + image,
 		"--set-string", p + "containers[0].command.policy=any",
 		"--set-string", p + "containers[0].args.policy=any",
+		"--set-string", p + "containers[0].mounts.policy=any",
 	}
 }
 
@@ -5265,6 +5365,65 @@ func TestChartSeedsCDSAllowlistFromBootstrapEntries(t *testing.T) {
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
 	if got := seedLabel(seed, cdsDigest); got != cdsRef {
 		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+	for _, al := range []pkgallowlist.Allowlist{*seed, worker.Allowlist.Base} {
+		for _, entry := range al.Workloads {
+			for _, c := range entry.Containers {
+				if c.Digest.String() == cdsDigest && c.Mounts.Policy != pkgallowlist.PolicyAny {
+					t.Errorf("generated CDS mount policy = %+v, want explicit any", c.Mounts)
+				}
+			}
+		}
+	}
+}
+
+func TestChartBasePreservesOperatorMountConstraints(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy string
+		want   pkgallowlist.MountPolicy
+	}{
+		{"omitted", "", pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"deny", pkgallowlist.PolicyDeny, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"exact", pkgallowlist.PolicyExact, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyExact, Rules: []pkgallowlist.MountRule{{Destination: "/cache", Kind: pkgallowlist.MountEmptyDir}}}},
+	}
+	var args []string
+	for i, tc := range cases {
+		p := "nriImagePolicy.bootstrapAllowlist.workloads." + tc.name + ".containers[0]."
+		args = append(args,
+			"--set-string", p+"digest="+fmt.Sprintf("sha256:abcdef%058d", i),
+			"--set-string", p+"command.policy=any",
+			"--set-string", p+"args.policy=any",
+		)
+		if tc.policy != "" {
+			args = append(args, "--set-string", p+"mounts.policy="+tc.policy)
+		}
+		if tc.policy == pkgallowlist.PolicyExact {
+			args = append(args,
+				"--set-string", p+"mounts.rules[0].destination=/cache",
+				"--set-string", p+"mounts.rules[0].kind=emptyDir",
+			)
+		}
+	}
+	out, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	seed := renderedSeed(t, out)
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	base := baseImages(worker.Allowlist.Base)
+	for _, tc := range cases {
+		entry, ok := seed.Workloads[tc.name]
+		if !ok || len(entry.Containers) != 1 {
+			t.Fatalf("operator entry %q missing from served seed", tc.name)
+		}
+		c := entry.Containers[0]
+		if !reflect.DeepEqual(c.Mounts, tc.want) {
+			t.Errorf("operator entry %q mount policy = %+v, want %+v", tc.name, c.Mounts, tc.want)
+		}
+		if _, ok := base[c.Digest.String()]; ok {
+			t.Errorf("operator entry %q with constrained mounts entered the boot base", tc.name)
+		}
 	}
 }
 
@@ -5683,7 +5842,7 @@ func TestChartServesAllowlistSeedInBareMetalMode(t *testing.T) {
 	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
 		t.Errorf("bare-metal-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+	const nginxD = "sha256:c2c3905bda3dc8de80023e19bed0a45745279d26e5586cdee64370c8f9b12348"
 	if _, ok := seedEntry(seed, nginxD); !ok {
 		t.Errorf("bare-metal-mode seed missing router nginx self-entry\nseed: %v", seed.Workloads)
 	}
@@ -6757,30 +6916,31 @@ func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
 	}
 }
 
-// The preStop hook must run `iptables-cleanup --keep-guard` so a terminating
-// mesh keeps the fail-closed guard while workloads are still running. A
-// regression dropping the flag would pass every rule-shape test but silently
-// downgrade running workloads to plaintext on restart.
-func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
+// The shutdown cleanup must run `iptables-cleanup --keep-guard` so a
+// terminating mesh keeps the fail-closed guard while workloads are still
+// running. A regression dropping the flag would pass every rule-shape test but
+// silently downgrade running workloads to plaintext on restart.
+func TestChartDaemonSetShutdownCleanupKeepsGuard(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	ds := findRATLSMeshDaemonSet(t, out)
-	var hook []string
+	var found int
 	for _, c := range allContainers(ds) {
-		if c.Lifecycle == nil || c.Lifecycle.PreStop == nil || c.Lifecycle.PreStop.Exec == nil {
+		command := strings.Join(c.Command, " ")
+		if !strings.Contains(command, "iptables-cleanup") {
 			continue
 		}
-		hook = append(hook, strings.Join(c.Lifecycle.PreStop.Exec.Command, " "))
-	}
-	if len(hook) == 0 {
-		t.Fatal("no preStop exec hook found in ratls-mesh DaemonSet")
-	}
-	for _, h := range hook {
-		if strings.Contains(h, "iptables-cleanup") && !strings.Contains(h, "--keep-guard") {
-			t.Errorf("preStop command %q does not carry --keep-guard", h)
+		found++
+		for _, want := range []string{"--keep-guard", "--on-shutdown"} {
+			if !strings.Contains(command, want) {
+				t.Errorf("cleanup command %q does not carry %s", command, want)
+			}
 		}
+	}
+	if found == 0 {
+		t.Fatal("no iptables-cleanup container found in the ratls-mesh DaemonSet")
 	}
 }
 
@@ -7090,6 +7250,40 @@ func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 	}
 }
 
+// The node image bakes the pull interval too, and under nriImagePolicy.baked
+// the installer runs set-cds-pins, which rewrites only the CDS pins. So the
+// interval a node-CVM's gate actually runs on is the baked one, and a drift
+// surfaces only as a policy change that bites later than the chart says.
+func TestChartRefreshIntervalMatchesTheBakedNRIPull(t *testing.T) {
+	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
+	baked, err := os.ReadFile(bakedPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", bakedPath, err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*interval:\s*"([^"]+)"`).FindSubmatch(baked)
+	if m == nil {
+		t.Fatalf("%s carries no allowlist pull interval", bakedPath)
+	}
+	want, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("baked pull interval %q: %v", m[1], err)
+	}
+
+	var values struct {
+		NRIImagePolicy struct {
+			Refresh struct {
+				Interval time.Duration `yaml:"interval"`
+			} `yaml:"refresh"`
+		} `yaml:"nriImagePolicy"`
+	}
+	readChartFile(t, "values.yaml", &values)
+
+	if got := values.NRIImagePolicy.Refresh.Interval; got != want {
+		t.Errorf("baked NRI pull interval is %s but nriImagePolicy.refresh.interval is %s — a tightened entry reaches a node-CVM's gate on the baked value (%s)",
+			want, got, bakedPath)
+	}
+}
+
 // The root key set is closed, so a values file carried over from an older
 // release — or one with a typo above the sealed subtrees — is refused instead
 // of being silently dropped. This is the class that caused the incident the
@@ -7366,4 +7560,44 @@ func TestRouterProbesUseHTTPSHealthChecks(t *testing.T) {
 		}
 	}
 
+}
+
+func TestChartSweepMountAdmission(t *testing.T) {
+	for _, baked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("baked=%v", baked), func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", "nriImagePolicy.baked="+strconv.FormatBool(baked))
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile("c8s/files/scripts/host-sweep.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idx := seed.BuildIndex()
+			for _, tc := range []struct {
+				name            string
+				argv            []string
+				hostMount, want bool
+			}{
+				{"sweep", []string{"/bin/sh", "-c", strings.TrimRight(string(script), "\n") + "\n"}, true, true},
+				{"pause", []string{"/bin/sleep", "2147483647"}, false, true},
+				{"pause with host mount", []string{"/bin/sleep", "2147483647"}, true, false},
+				{"shell pause with host mount", []string{"/bin/sh", "-c", "sleep infinity"}, true, false},
+				{"unpinned script", []string{"/bin/sh", "-c", "echo unexpected"}, true, false},
+			} {
+				mounts := []pkgallowlist.ObservedMount{}
+				if tc.hostMount {
+					mounts = append(mounts, pkgallowlist.ObservedMount{Source: "/", Destination: "/host", Class: pkgallowlist.MountHost, Storage: pkgallowlist.MountUnknown})
+				}
+				if got := idx.AdmitsContainer(pkgallowlist.RunningContainer{Digest: baseNRIDigest, Argv: tc.argv, Mounts: mounts}); got != tc.want {
+					t.Errorf("%s admitted=%v, want %v", tc.name, got, tc.want)
+				}
+			}
+		})
+	}
 }

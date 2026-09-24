@@ -1,14 +1,12 @@
 package getvolume
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"context"
-	"path/filepath"
-
-	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -48,16 +46,14 @@ func TestParseVolumeSpecAcceptsTheLongestServableName(t *testing.T) {
 
 func validConfig() config {
 	return config{
-		Config: sidecar.Config{
-			CDSURL:            "https://cds.example",
-			AttestationApiURL: "http://127.0.0.1:8400",
-			Attempts:          60,
-			RetryInterval:     5 * time.Second,
-			RequestTimeout:    10 * time.Second,
-			InventoryTimeout:  5 * time.Second,
-		},
-		SocketDir: "/run/c8s/workload-claims",
-		Volumes:   []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
+		CDSURL:            "https://cds.example",
+		AttestationApiURL: "http://127.0.0.1:8400",
+		Attempts:          60,
+		RetryInterval:     5 * time.Second,
+		RequestTimeout:    10 * time.Second,
+		InventoryTimeout:  5 * time.Second,
+		SocketDir:         "/run/c8s/workload-claims",
+		Volumes:           []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
 	}
 }
 
