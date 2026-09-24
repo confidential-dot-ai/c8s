@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 func TestServerCredentialRequiresRealRAMFilesystem(t *testing.T) {
@@ -32,7 +34,7 @@ func TestServerCredentialRequiresRealRAMFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := requireTokenRAM(root); err == nil {
+	if err := fileutil.RequireRAMBackedRoot(root); err == nil {
 		t.Skip("test temporary directory is also RAM-backed")
 	}
 	diskPath := filepath.Join(root.Name(), "agent-token")

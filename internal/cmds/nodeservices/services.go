@@ -4,9 +4,11 @@ package nodeservices
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/join"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
@@ -56,47 +58,23 @@ func PublishNodeIP(rootDir string, d *launchconfig.Document) error {
 	return fileutil.WriteAtomic(dst, []byte(address+"\n"), 0600)
 }
 
-const (
-	attestationAPIURL = launchconfig.DefaultAttestationAPIURL
-	// enrollmentPort is where a server releases the agent token to attested
-	// agents and where agents connect. It is fixed in the measured units.
-	enrollmentPort = "8444"
-	// releasedTokenPath is the full agent token RKE2 derives from the minted
-	// password once the server is up: it carries the cluster CA pin an agent
-	// needs, which is why release waits for rke2-server.
-	releasedTokenPath = "/var/lib/rancher/rke2/server/agent-token"
-	// enrolledTokenPath is where an agent stages the token it enrolled for.
-	// RKE2's role fragment points token-file at it; it must stay RAM-backed.
-	enrolledTokenPath = "/run/confos/rke2-agent-token"
-)
-
-// Arguments builds the argv for the attested enrollment host services from a
-// document that already passed LoadStaged. Only the two enrollment services
-// remain host processes with role-dependent arguments; every other core
-// service is a baked Kubernetes workload or has a fixed ExecStart.
-func Arguments(service string, d *launchconfig.Document) ([]string, error) {
+// JoinConfig builds the agent's enrollment client from a document that already
+// passed LoadStaged. The designated server address is its only role-dependent
+// value; the release side needs nothing from the document, so its unit states
+// every flag itself.
+func JoinConfig(d *launchconfig.Document) (join.JoinConfig, error) {
 	if err := validateRole(d); err != nil {
-		return nil, err
+		return join.JoinConfig{}, err
 	}
-	api := "--attestation-api-url=" + attestationAPIURL
-	switch service {
-	case "join-release":
-		if d.Role != launchconfig.Server {
-			return nil, fmt.Errorf("join-release is a server-only service")
-		}
-		if len(d.AgentOperatorPublicKeys) == 0 {
-			return nil, fmt.Errorf("join-release requires authorized agents")
-		}
-		return []string{"join-release", "--listen=:" + enrollmentPort, "--platform=" + d.Image.Platform, api,
-			"--measurements-config=" + launchDir + "agents.json",
-			"--token-path=" + releasedTokenPath}, nil
-	case "join":
-		if d.Role != launchconfig.Agent {
-			return nil, fmt.Errorf("join is an agent-only service")
-		}
-		return []string{"join", "--server=" + d.Server.Address + ":" + enrollmentPort, "--platform=" + d.Image.Platform, api,
-			"--measurements-config=" + launchDir + "cds.json",
-			"--token-out=" + enrolledTokenPath}, nil
+	if d.Role != launchconfig.Agent {
+		return join.JoinConfig{}, fmt.Errorf("join is an agent-only service")
 	}
-	return nil, fmt.Errorf("unknown host service %q", service)
+	return join.JoinConfig{
+		ServerAddr:         net.JoinHostPort(d.Server.Address, join.Port),
+		AttestationAPIURL:  launchconfig.DefaultAttestationAPIURL,
+		Platform:           d.Image.Platform,
+		MeasurementsConfig: launchDir + "cds.json",
+		TokenOut:           launchconfig.AgentTokenPath,
+		Timeout:            join.DefaultTimeout,
+	}, nil
 }

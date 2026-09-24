@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -32,15 +32,16 @@ func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, server
 	if path == "" {
 		return peerPolicy{}, fmt.Errorf("--measurements-config is required")
 	}
-	family, err := teetypes.ParseFamily(platform)
-	if err != nil {
-		return peerPolicy{}, fmt.Errorf("--platform: %w", err)
+	if platform == "" {
+		return peerPolicy{}, fmt.Errorf("--platform is required")
 	}
-	refs, err := refvalues.Load(path)
+	refs, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
+		Source: cmdsutil.ImagePolicySource{File: path}, Platform: platform})
 	if err != nil {
 		return peerPolicy{}, err
 	}
-	if refs.Family != family || len(refs.Images) == 0 {
+	family := refs.Family
+	if len(refs.Images) == 0 {
 		return peerPolicy{}, fmt.Errorf("join: policy must contain authorized %s identities", family)
 	}
 	if server && len(refs.Images) != 1 {

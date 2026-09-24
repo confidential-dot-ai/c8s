@@ -6,13 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/join"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
@@ -296,39 +296,17 @@ func TestPrepareAllowsIdenticalMeasuredFloorEntry(t *testing.T) {
 	}
 }
 
-func TestJoinServicesRequireTheirSeparateRolePolicies(t *testing.T) {
-	server := document(t, launchconfig.Server)
-	if _, err := Arguments("join", server); err == nil {
-		t.Fatal("server can execute agent enrollment")
+func TestJoinConfigIsAgentOnlyAndPinsTheDesignatedServer(t *testing.T) {
+	if _, err := JoinConfig(document(t, launchconfig.Server)); err == nil {
+		t.Fatal("server can run agent enrollment")
 	}
-	if _, err := Arguments("join-release", server); err == nil {
-		t.Fatal("server with no authorized agents can release join tokens")
-	}
-	if _, err := Arguments("arbitrary", server); err == nil {
-		t.Fatal("unknown host service accepted")
-	}
-	server.AgentOperatorPublicKeys = []string{"authorized agent"}
-	args, err := Arguments("join-release", server)
+	cfg, err := JoinConfig(document(t, launchconfig.Agent))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(args, "--measurements-config="+launchDir+"agents.json") {
-		t.Fatal("join release does not restrict callers to the agent policy")
-	}
-	if !slices.Contains(args, "--token-path=/var/lib/rancher/rke2/server/agent-token") {
-		t.Fatal("join release must serve the CA-pinned token RKE2 derives")
-	}
-	agent := document(t, launchconfig.Agent)
-	if _, err := Arguments("join-release", agent); err == nil {
-		t.Fatal("agent can release join tokens")
-	}
-	args, err = Arguments("join", agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"--measurements-config=" + launchDir + "cds.json", "--server=192.0.2.10:8444", "--token-out=/run/confos/rke2-agent-token", "--platform=tdx"} {
-		if !slices.Contains(args, required) {
-			t.Fatalf("missing enrollment argument %s", required)
-		}
+	want := join.JoinConfig{ServerAddr: "192.0.2.10:8444", AttestationAPIURL: launchconfig.DefaultAttestationAPIURL,
+		Platform: "tdx", MeasurementsConfig: launchDir + "cds.json", TokenOut: "/run/confos/rke2-agent-token", Timeout: join.DefaultTimeout}
+	if cfg != want {
+		t.Fatalf("enrollment config = %+v, want %+v", cfg, want)
 	}
 }

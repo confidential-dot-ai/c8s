@@ -87,9 +87,9 @@ func testConfig(t *testing.T, doc Document, key *ecdsa.PrivateKey) Config {
 	t.Helper()
 	// The agent token is minted into the rebased /run/confos, which is a
 	// plain temp dir here; production checks the real mount is RAM-backed.
-	oldRAM := requireTokenRAM
-	t.Cleanup(func() { requireTokenRAM = oldRAM })
-	requireTokenRAM = func(*os.Root) error { return nil }
+	oldOpen := openTokenDir
+	t.Cleanup(func() { openTokenDir = oldOpen })
+	openTokenDir = func(_, dir string) (*os.Root, error) { return os.OpenRoot(dir) }
 	cfg := Config{Platform: doc.Image.Platform, RootDir: t.TempDir()}
 	cfg.DocumentPath = filepath.Join(t.TempDir(), "launch.yaml")
 	cfg.SignaturePath = cfg.DocumentPath + ".sig"
@@ -175,10 +175,9 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					requireAbsent(t, cfg.path(agentMarker))
 					// No credential comes from launch media: RKE2 mints its own
 					// server token and the agent token is generated here.
-					requireAbsent(t, cfg.path(serverTokenPath))
-					requirePresent(t, cfg.path(agentTokenPath))
-					private = append(private, agentTokenPath, Dir+"/agents.json")
-					if roleConfig.TokenFile != "" || roleConfig.AgentTokenFile != agentTokenPath {
+					requirePresent(t, cfg.path(AgentTokenPath))
+					private = append(private, AgentTokenPath, Dir+"/agents.json")
+					if roleConfig.TokenFile != "" || roleConfig.AgentTokenFile != AgentTokenPath {
 						t.Fatal("server must let RKE2 generate its token and configure the separate agent token")
 					}
 					agents, err := refvalues.Load(cfg.path(Dir + "/agents.json"))
@@ -191,12 +190,11 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				} else {
 					requirePresent(t, cfg.path(agentMarker))
 					requireAbsent(t, cfg.path(serverMarker))
-					requireAbsent(t, cfg.path(serverTokenPath))
 					// Agents receive their token through attested enrollment,
 					// never from staging.
-					requireAbsent(t, cfg.path(agentTokenPath))
+					requireAbsent(t, cfg.path(AgentTokenPath))
 					requireAbsent(t, cfg.path(Dir+"/agents.json"))
-					if roleConfig.TokenFile != agentTokenPath || !bytes.Contains(fragment, []byte("server: https://10.0.0.1:9345")) {
+					if roleConfig.TokenFile != AgentTokenPath || !bytes.Contains(fragment, []byte("server: https://10.0.0.1:9345")) {
 						t.Fatal("agent does not join signed server with the enrolled token")
 					}
 				}
@@ -330,7 +328,7 @@ func TestFailedRestagingClosesGatesAndPreservesLocalCredential(t *testing.T) {
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	token, err := os.ReadFile(cfg.path(agentTokenPath))
+	token, err := os.ReadFile(cfg.path(AgentTokenPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,15 +341,15 @@ func TestFailedRestagingClosesGatesAndPreservesLocalCredential(t *testing.T) {
 	// The minted agent token belongs to the running cluster: the role gates
 	// close, but the credential agents already enrolled with is not rotated
 	// underneath them by a failed restaging.
-	requirePresent(t, cfg.path(agentTokenPath))
-	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, DefaultStagedPath, rke2FragmentPath, Dir + "/agents.json"} {
+	requirePresent(t, cfg.path(AgentTokenPath))
+	for _, path := range []string{serverMarker, agentMarker, DefaultStagedPath, rke2FragmentPath, Dir + "/agents.json"} {
 		requireAbsent(t, cfg.path(path))
 	}
 	signDocument(t, cfg, doc, key)
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	again, err := os.ReadFile(cfg.path(agentTokenPath))
+	again, err := os.ReadFile(cfg.path(AgentTokenPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +493,7 @@ func TestMissingMeasuredImageCannotStageARole(t *testing.T) {
 			if err := Stage(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "contains no "+missing) {
 				t.Fatalf("missing %s: %v", missing, err)
 			}
-			for _, path := range []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, DefaultStagedPath} {
+			for _, path := range []string{serverMarker, agentMarker, AgentTokenPath, DefaultStagedPath} {
 				requireAbsent(t, cfg.path(path))
 			}
 		})

@@ -14,7 +14,7 @@ RemainAfterExit=yes
 # attempt is a fresh start job rather than a child this unit must reap.
 # StartLimitIntervalSec=0 keeps the restarts unbounded, so dependent RKE2
 # still starts whenever the server recovers.
-ExecStart=/usr/local/bin/c8s node-services run join
+ExecStart=/usr/local/bin/c8s node-services join
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300

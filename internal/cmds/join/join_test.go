@@ -80,6 +80,7 @@ func TestJoinExchangeE2E(t *testing.T) {
 	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
 		for _, scenario := range []string{"authorized", "wrong server key", "wrong agent key", "wrong server image", "wrong agent image", "wrong server TEE", "wrong agent TEE"} {
 			t.Run(string(platform)+"/"+scenario, func(t *testing.T) {
+				t.Parallel()
 				dir := ramTempDir(t)
 				serverKey, agentKey := operatorKey(t), operatorKey(t)
 				serverVerdict := verifyResp(platform, serverKey)

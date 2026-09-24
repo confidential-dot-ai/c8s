@@ -9,12 +9,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
-// Tests replace only the filesystem probe; the production path always checks
+// Tests replace only the RAM-backed open; the production path always checks
 // the opened directory handle before reading or writing a credential.
-var requireTokenRAM = fileutil.RequireRAMBackedRoot
+var openTokenDir = cmdsutil.OpenRAMBackedDir
 
 // initializeAgentToken creates a separate agent password before the first
 // server RKE2 start. The serialized role oneshot preserves it across restarts;
@@ -23,14 +24,11 @@ func initializeAgentToken(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create agent token directory: %w", err)
 	}
-	root, err := os.OpenRoot(filepath.Dir(path))
+	root, err := openTokenDir("agent token storage", filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("open agent token directory: %w", err)
+		return err
 	}
 	defer root.Close()
-	if err := requireTokenRAM(root); err != nil {
-		return fmt.Errorf("agent token storage: %w", err)
-	}
 	name := filepath.Base(path)
 	if err := validateExistingAgentToken(root, name); !errors.Is(err, os.ErrNotExist) {
 		return err

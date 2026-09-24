@@ -19,14 +19,14 @@ func TestServerCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	token, err := os.ReadFile(cfg.path(agentTokenPath))
+	token, err := os.ReadFile(cfg.path(AgentTokenPath))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(token) != 64 {
 		t.Fatal("agent password was not generated")
 	}
-	info, err := os.Stat(cfg.path(agentTokenPath))
+	info, err := os.Stat(cfg.path(AgentTokenPath))
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("agent credential is not private")
 	}
@@ -59,7 +59,7 @@ func TestServerCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.ReadFile(cfg.path(agentTokenPath))
+	after, err := os.ReadFile(cfg.path(AgentTokenPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestServerCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if err := Stage(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
-	other, err := os.ReadFile(fresh.path(agentTokenPath))
+	other, err := os.ReadFile(fresh.path(AgentTokenPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +99,14 @@ func TestServerCredentialStorageFailsClosed(t *testing.T) {
 				}
 			}
 			denied := errors.New("not RAM-backed")
-			requireTokenRAM = func(*os.Root) error { return denied }
+			openTokenDir = func(string, string) (*os.Root, error) { return nil, denied }
 			if err := Stage(context.Background(), cfg); !errors.Is(err, denied) {
 				t.Fatalf("got %v", err)
 			}
 			requireAbsent(t, cfg.path(serverMarker))
 			requireAbsent(t, cfg.path(agentMarker))
 			if !existing {
-				requireAbsent(t, cfg.path(agentTokenPath))
+				requireAbsent(t, cfg.path(AgentTokenPath))
 			}
 		})
 	}
@@ -118,7 +118,7 @@ func TestServerRejectsUnsafeExistingCredential(t *testing.T) {
 			doc, key, pub := testDocument(t, "snp", Server)
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
-			path := cfg.path(agentTokenPath)
+			path := cfg.path(AgentTokenPath)
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}

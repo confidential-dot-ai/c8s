@@ -117,18 +117,12 @@ payload_units=(rke2-server.service rke2-agent.service "${core_units[@]}")
 active() { systemctl is-active --quiet "$1"; }
 not_active() { ! active "$1"; }
 cond_skipped() { [[ $(systemctl show -p ConditionResult --value "$1") == no ]]; }
-# The shipped unit starts only when every plain ConditionPathExists holds and,
-# if it lists any "|" triggering paths, at least one of those exists.
-unit_conditions_met() {
-    local path triggers=0 triggered=0
-    while IFS= read -r path; do
-        case "$path" in
-            '|'*) triggers=1; [[ -e ${path#|} ]] && triggered=1 ;;
-            *) [[ -e $path ]] || return 1 ;;
-        esac
-    done < <(sed -n 's/^ConditionPathExists=//p' "$SOURCE_UNITS/$1")
-    (( triggers == 0 || triggered == 1 ))
-}
+# Host services each role must run; every other core unit must be skipped by
+# its own condition. Stated here rather than derived from the units under test.
+declare -A role_units=(
+    [server]="attest-proxy.service cred-release.service nri-node-ip.service c8s-join-release.service"
+    [agent]="attest-proxy.service nri-node-ip.service c8s-join.service"
+)
 boot_roles() { systemctl start "${payload_units[@]}"; }
 scenario_reset() {
     systemctl stop "${payload_units[@]}" rke2-role.service attestation-api.service apparmor-enforce.service >/dev/null 2>&1 || true
@@ -170,7 +164,7 @@ for role in server agent; do
     ok "$skipped inactive" not_active "$skipped"
     ok "$skipped condition skipped" cond_skipped "$skipped"
     for unit in "${core_units[@]}"; do
-        if unit_conditions_met "$unit"; then
+        if [[ " ${role_units[$role]} " == *" $unit "* ]]; then
             ok "$unit active on $role" active "$unit"
         else
             ok "$unit inactive on $role" not_active "$unit"
@@ -198,8 +192,6 @@ ok "agent boots" boot_roles
 ok "enrollment active" active c8s-join.service
 systemctl stop c8s-join.service
 ok "agent stops with its enrollment gate" not_active rke2-agent.service
-ok "enrollment gate is required by rke2-agent" \
-    grep -qE '^Requires=.*c8s-join[.]service' "$SOURCE_UNITS/rke2-agent.service.d/20-role.conf"
 
 for scenario in missing-launch invalid-signature prepare-failure; do
     CASE="boot-$scenario"

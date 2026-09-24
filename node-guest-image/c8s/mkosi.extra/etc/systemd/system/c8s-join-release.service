@@ -8,7 +8,16 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/c8s node-services run join-release
+# Nothing here comes from the launch document: staging gates the unit on the
+# authorized agent policy, and ${CRED_PLATFORM} comes from the drop-in the c8s
+# sync hook renders. With it unset, --platform= is empty and fails closed.
+# RKE2 writes the CA-pinned agent token once the server has initialised.
+ExecStart=/usr/local/bin/c8s join-release \
+    --listen :8444 \
+    --attestation-api-url http://127.0.0.1:8400 \
+    --platform=${CRED_PLATFORM} \
+    --measurements-config /run/confos/launch/agents.json \
+    --token-path /var/lib/rancher/rke2/server/agent-token
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

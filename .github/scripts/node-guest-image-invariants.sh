@@ -482,7 +482,7 @@ release_unit="$units/c8s-join-release.service"
 for setting in 'ConditionPathExists=/run/confos/role-agent' 'Type=oneshot' \
                'RemainAfterExit=yes' 'StartLimitIntervalSec=0' \
                'Restart=on-failure' 'RestartSec=5' \
-               'ExecStart=/usr/local/bin/c8s node-services run join'; do
+               'ExecStart=/usr/local/bin/c8s node-services join'; do
   grep -qxF "$setting" "$join_unit" || { echo "::error::$join_unit lost enrollment gate: $setting"; exit 1; }
 done
 if ! grep -qE '^Requires=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf" \
@@ -502,7 +502,10 @@ for enrollment_unit in "$join_unit" "$release_unit"; do
   fi
 done
 if ! grep -qxF 'ConditionPathExists=/run/confos/launch/agents.json' "$release_unit" \
-   || ! grep -qxF 'ExecStart=/usr/local/bin/c8s node-services run join-release' "$release_unit" \
+   || ! grep -qxF 'ExecStart=/usr/local/bin/c8s join-release \' "$release_unit" \
+   || ! grep -qF -- '--platform=${CRED_PLATFORM}' "$release_unit" \
+   || ! grep -qF -- '--measurements-config /run/confos/launch/agents.json' "$release_unit" \
+   || ! grep -qF 'c8s-join-release.service.d/10-platform.conf' "$ngi/c8s/mkosi.sync" \
    || ! grep -qE '^After=.*rke2-server[.]service' "$release_unit"; then
   echo "::error::join release must wait for the server and require authorized agents"
   exit 1

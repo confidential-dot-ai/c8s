@@ -64,9 +64,9 @@ func stageBundleNode(t *testing.T, dir, node string) {
 	t.Helper()
 	// Staging a server mints the agent token into the rebased /run/confos,
 	// a plain temp dir here; production checks the real mount is RAM-backed.
-	oldRAM := requireTokenRAM
-	t.Cleanup(func() { requireTokenRAM = oldRAM })
-	requireTokenRAM = func(*os.Root) error { return nil }
+	oldOpen := openTokenDir
+	t.Cleanup(func() { openTokenDir = oldOpen })
+	openTokenDir = func(_, dir string) (*os.Root, error) { return os.OpenRoot(dir) }
 	doc, _ := readBundleDocument(t, dir, node)
 	pub, err := os.ReadFile(filepath.Join(dir, node, pubkeyFile))
 	if err != nil {
