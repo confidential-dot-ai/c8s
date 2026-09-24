@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -34,6 +35,44 @@ func ObserveEnv(entries []string) (*EnvObservation, error) {
 		values[name] = value
 	}
 	return fingerprintEnv(values), nil
+}
+
+// ObserveLaunchEnv observes an OCI process environment as the runtime actually
+// presents it to execve. runc drops duplicate names, keeping the LAST value for
+// each key (libcontainer/env.go, prepareEnv), so a duplicate name is not
+// unobservable evidence: the launched environment is well defined.
+//
+// containerd produces such duplicates whenever a CDI container edit sets a name
+// the image config or pod spec already set — e.g. NVIDIA_VISIBLE_DEVICES, which
+// every CUDA base image sets and which the NVIDIA CDI spec rewrites to "void".
+// The cause is upstream: runtime-tools' createEnvCacheMap keys its cache on the
+// whole "NAME=VALUE" string while addEnv looks the name up, so the replace path
+// never hits and the edit is appended (generate/generate.go).
+//
+// Treating that as unknown evidence forced every such GPU workload onto
+// `env: any`, which is strictly worse: it left the environment unconstrained.
+// Canonicalizing with the runtime's own rule describes exactly what runs.
+func ObserveLaunchEnv(entries []string) (*EnvObservation, error) {
+	return ObserveEnv(dedupLastWins(entries))
+}
+
+// dedupLastWins keeps the last occurrence of each name, matching runc. Entries
+// without "=" are left untouched so ObserveEnv still rejects them as malformed.
+func dedupLastWins(entries []string) []string {
+	seen := make(map[string]bool, len(entries))
+	out := make([]string, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		name, _, ok := strings.Cut(entries[i], "=")
+		if ok {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+		}
+		out = append(out, entries[i])
+	}
+	slices.Reverse(out)
+	return out
 }
 
 func validEnvPair(name, value string) bool {
