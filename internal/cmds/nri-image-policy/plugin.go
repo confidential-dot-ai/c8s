@@ -967,20 +967,7 @@ func extractDigest(imageRef string) string {
 	return d.String()
 }
 
-// containerEnv refuses an incomplete OCI process. containerd can report an
-// empty spec after a failed spec read; that must not look like observed-empty.
-// A runnable OCI process has at least one argument, even when its env is empty.
-// observeEnv observes a container's OCI environment. Duplicate names normally
-// make it unobservable — the ambiguity must not collapse into a map and then
-// satisfy a constrained grant. A container carrying CDI devices is the one case
-// where the ambiguity is not real: containerd appends rather than replaces when
-// a CDI edit sets a name the image config or pod spec already set (runtime-tools
-// generate.createEnvCacheMap keys its cache on "NAME=VALUE" while addEnv looks
-// up the name), and runc then keeps the last value (libcontainer, prepareEnv).
-// For those containers the launch environment is well defined, so observe it
-// with the runtime's own rule instead of reporting the whole environment as
-// unknown and leaving `env: any` as the only policy that can admit a GPU
-// workload. Every other container keeps the strict reading.
+// observeEnv uses runc's last-value rule for duplicate names on CDI containers.
 func observeEnv(ctr *api.Container) (*allowlist.EnvObservation, error) {
 	obs, err := allowlist.ObserveEnv(ctr.GetEnv())
 	if err == nil || !cdiInjected(ctr) {
@@ -1010,6 +997,9 @@ func cdiInjected(ctr *api.Container) bool {
 // device references to the runtime.
 const cdiAnnotationPrefix = "cdi.k8s.io/"
 
+// containerEnv refuses an incomplete OCI process. containerd can report an
+// empty spec after a failed spec read; that must not look like observed-empty.
+// A runnable OCI process has at least one argument, even when its env is empty.
 func containerEnv(ctr *api.Container) *allowlist.EnvObservation {
 	if len(ctr.GetArgs()) == 0 {
 		return nil
