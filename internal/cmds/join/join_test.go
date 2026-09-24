@@ -388,3 +388,15 @@ func TestJoinRejectsMissingPolicyBeforeNetwork(t *testing.T) {
 	}
 	assertAbsent(t, cfg.TokenOut)
 }
+
+func TestPinnedServerCertAcceptsOnlyTheVerifiedLeaf(t *testing.T) {
+	verify := pinnedServerCert([]byte("verified leaf"))
+	if err := verify([][]byte{[]byte("verified leaf")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][][]byte{nil, {[]byte("rotated leaf")}} {
+		if err := verify(raw, nil); err == nil {
+			t.Fatalf("accepted %q", raw)
+		}
+	}
+}

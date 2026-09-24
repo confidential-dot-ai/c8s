@@ -143,11 +143,10 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	}
 }
 
-// handshakeBudget matches the agent's TLS handshake allowance. Under TLS 1.3
-// the agent verifies this server's quote before it sends its own certificate,
-// so the server must keep the handshake open for the agent's whole
-// verification budget rather than drop it as a slow client.
-const handshakeBudget = 2 * DefaultTimeout
+// handshakeTimeout bounds how long an unauthenticated connection may hold one
+// of the listener's slots before sending its request. Agents verify this
+// server's quote before connecting, so their handshake does no slow work.
+const handshakeTimeout = 10 * time.Second
 
 // newReleaseServer bounds every phase by what the exchange legitimately needs.
 // net/http cuts the TLS handshake at the smaller of ReadHeaderTimeout and
@@ -157,9 +156,9 @@ func newReleaseServer(handler http.Handler, tlsCfg *tls.Config, verifyTimeout ti
 	return &http.Server{
 		Handler:           handler,
 		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: handshakeBudget,
+		ReadHeaderTimeout: handshakeTimeout,
 		// A slow reader or parked keep-alive must not hold a goroutine open.
-		WriteTimeout:   handshakeBudget + verifyTimeout,
+		WriteTimeout:   handshakeTimeout + verifyTimeout,
 		IdleTimeout:    30 * time.Second,
 		MaxHeaderBytes: 16 << 10,
 	}

@@ -484,14 +484,13 @@ func TestReleaseRequiresAttestedPrivateKeyPossession(t *testing.T) {
 	}
 }
 
-// The agent verifies the server inside the TLS handshake and the handler then
-// verifies the agent, so neither step may outlive the server's deadlines.
-func TestReleaseServerOutlastsPeerVerification(t *testing.T) {
+// Stalled handshakes release their slot quickly, while the write deadline,
+// which restarts after the headers, still covers the handler's verification.
+func TestReleaseServerDeadlines(t *testing.T) {
 	const verifyTimeout = 20 * time.Second
 	srv := newReleaseServer(http.NotFoundHandler(), &tls.Config{}, verifyTimeout)
-	handshake := min(srv.ReadHeaderTimeout, srv.WriteTimeout)
-	if agentBudget := 2 * DefaultTimeout; handshake < agentBudget {
-		t.Fatalf("server handshake deadline %s is shorter than the agent's %s", handshake, agentBudget)
+	if handshake := min(srv.ReadHeaderTimeout, srv.WriteTimeout); handshake != handshakeTimeout {
+		t.Fatalf("handshake deadline %s, want %s", handshake, handshakeTimeout)
 	}
 	if srv.WriteTimeout <= verifyTimeout {
 		t.Fatalf("write deadline %s leaves no room after a %s verification", srv.WriteTimeout, verifyTimeout)

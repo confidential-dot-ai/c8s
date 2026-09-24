@@ -91,21 +91,6 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if err != nil {
 		return fmt.Errorf("build RA-TLS client config: %w", err)
 	}
-	// Add the explicit hardware-family pin to the shared certificate verifier.
-	// The callback carries no context, so give online verification its own bound.
-	tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return fmt.Errorf("join: server presented no certificate")
-		}
-		leaf, err := x509.ParseCertificate(rawCerts[0])
-		if err != nil {
-			return fmt.Errorf("join: parse server cert: %w", err)
-		}
-		vctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		defer cancel()
-		return verifyPeer(vctx, leaf, policy)
-	}
-
 	warmCtx, cancelWarm := context.WithTimeout(ctx, cfg.Timeout)
 	err = certMgr.WarmUp(warmCtx)
 	cancelWarm()
@@ -113,7 +98,22 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		return fmt.Errorf("provision client cert: %w", err)
 	}
 
-	token, err := fetchToken(ctx, cfg, tlsCfg.Clone())
+	// Verify the server's quote with no connection open, then accept only that
+	// exact certificate. Keeping the slow attestation-api call out of the
+	// handshake lets join-release drop stalled handshakes after a short bound.
+	leaf, err := probeServerCert(ctx, cfg, tlsCfg.Clone())
+	if err != nil {
+		return err
+	}
+	vctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	err = verifyPeer(vctx, leaf, policy)
+	cancel()
+	if err != nil {
+		return err
+	}
+	fetchCfg := tlsCfg.Clone()
+	fetchCfg.VerifyPeerCertificate = pinnedServerCert(leaf.Raw)
+	token, err := fetchToken(ctx, cfg, fetchCfg)
 	if err != nil {
 		return err
 	}
@@ -125,16 +125,59 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	return nil
 }
 
+// probeServerCert reads the server's leaf certificate and aborts the handshake
+// before this node sends its own certificate. Nothing it returns is trusted
+// until verifyPeer accepts it.
+func probeServerCert(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (*x509.Certificate, error) {
+	var raw []byte
+	tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) > 0 {
+			raw = rawCerts[0]
+		}
+		return errProbeDone
+	}
+	dctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	conn, err := (&tls.Dialer{Config: tlsCfg}).DialContext(dctx, "tcp", cfg.ServerAddr)
+	if err == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("join: server certificate probe completed a handshake")
+	}
+	if !errors.Is(err, errProbeDone) {
+		return nil, fmt.Errorf("fetch server certificate: %w", err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("join: server presented no certificate")
+	}
+	leaf, err := x509.ParseCertificate(raw)
+	if err != nil {
+		return nil, fmt.Errorf("join: parse server cert: %w", err)
+	}
+	return leaf, nil
+}
+
+var errProbeDone = errors.New("server certificate captured")
+
+// pinnedServerCert accepts only the leaf verifyPeer already accepted. The TLS
+// handshake still proves the server holds that leaf's key; a certificate that
+// rotated in between fails this attempt and the unit retries.
+func pinnedServerCert(verified []byte) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 || !bytes.Equal(rawCerts[0], verified) {
+			return fmt.Errorf("join: server certificate changed after verification")
+		}
+		return nil
+	}
+}
+
 // fetchToken performs the GET /join-token exchange over the mutually
-// attested channel. The handshake budget is strictly larger than the
-// verifyPeer budget nested inside it (cfg.Timeout, armed in the
-// VerifyPeerCertificate callback), so a slow local verifier hits its own
-// deadline first and the error names the attestation-api, not the server.
+// attested channel. The server certificate was verified beforehand, so the
+// handshake does no attestation work and gets a single step's budget.
 func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string, error) {
-	transport := &http.Transport{TLSClientConfig: tlsCfg, TLSHandshakeTimeout: 2 * cfg.Timeout}
+	transport := &http.Transport{TLSClientConfig: tlsCfg, TLSHandshakeTimeout: cfg.Timeout}
 	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{
-		Timeout:   3 * cfg.Timeout, // handshake budget + request
+		Timeout:   2 * cfg.Timeout, // handshake + request
 		Transport: transport,
 		// join-release never redirects.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
