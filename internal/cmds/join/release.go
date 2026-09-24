@@ -127,15 +127,7 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		}
 	}
 
-	srv := &http.Server{
-		Handler:           handler,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second,
-		// A slow reader or parked keep-alive must not hold a goroutine open.
-		WriteTimeout:   10 * time.Second,
-		IdleTimeout:    30 * time.Second,
-		MaxHeaderBytes: 16 << 10,
-	}
+	srv := newReleaseServer(handler, tlsCfg, cfg.VerifyTimeout)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -148,6 +140,28 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// handshakeBudget matches the agent's TLS handshake allowance. Under TLS 1.3
+// the agent verifies this server's quote before it sends its own certificate,
+// so the server must keep the handshake open for the agent's whole
+// verification budget rather than drop it as a slow client.
+const handshakeBudget = 2 * DefaultTimeout
+
+// newReleaseServer bounds every phase by what the exchange legitimately needs.
+// net/http cuts the TLS handshake at the smaller of ReadHeaderTimeout and
+// WriteTimeout, and restarts WriteTimeout once the request headers are read,
+// so that deadline must also cover the handler's own peer verification.
+func newReleaseServer(handler http.Handler, tlsCfg *tls.Config, verifyTimeout time.Duration) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: handshakeBudget,
+		// A slow reader or parked keep-alive must not hold a goroutine open.
+		WriteTimeout:   handshakeBudget + verifyTimeout,
+		IdleTimeout:    30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 }
 
